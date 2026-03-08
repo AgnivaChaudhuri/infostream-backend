@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from infostream.digest.schema import validate_citations, validate_digest_schema
+
+
+def test_digest_schema_validation_success() -> None:
+    payload = {
+        "version": "0.1.0",
+        "new_communications": {},
+        "important_dates_events": [],
+        "interests": {
+            "general": [
+                {
+                    "text": "hello",
+                    "source_refs": ["item:1"],
+                    "confidence": "medium",
+                }
+            ]
+        },
+        "links": [],
+        "entities": [],
+        "relations": [],
+        "extraneous": "",
+    }
+    assert validate_digest_schema(payload) == []
+    assert validate_citations(payload, {"item:1"}) == []
+
+
+def test_digest_schema_rejects_unknown_citation() -> None:
+    payload = {
+        "version": "0.1.0",
+        "new_communications": {},
+        "important_dates_events": [],
+        "interests": {
+            "general": [
+                {
+                    "text": "hello",
+                    "source_refs": ["item:missing"],
+                    "confidence": "medium",
+                }
+            ]
+        },
+        "links": [],
+        "entities": [],
+        "relations": [],
+        "extraneous": "",
+    }
+    errors = validate_citations(payload, {"item:exists"})
+    assert errors

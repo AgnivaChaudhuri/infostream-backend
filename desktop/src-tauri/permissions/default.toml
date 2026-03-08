@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "default"
+description = "Default app command permissions"
+commands.allow = ["bootstrap_backend"]

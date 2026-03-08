@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CURSOR=""
+if [[ "${1:-}" == "--cursor" ]]; then
+  CURSOR="${2:-}"
+fi
+
+mkdir -p src_media
+printf 'demo-media-data\n' > src_media/demo.txt
+
+if [[ -z "$CURSOR" ]]; then
+  NEXT_CURSOR="cursor-1"
+  EXTERNAL_ID="demo-1"
+  TITLE="Demo update one"
+  CONTENT="This is the first deterministic demo source item."
+else
+  NEXT_CURSOR="cursor-2"
+  EXTERNAL_ID="demo-2"
+  TITLE="Demo update two"
+  CONTENT="This is a second deterministic item after cursor."
+fi
+
+cat > src_output.json <<JSON
+{
+  "items": [
+    {
+      "external_id": "$EXTERNAL_ID",
+      "url": "https://example.com/$EXTERNAL_ID",
+      "title": "$TITLE",
+      "created_at": "2026-03-01T12:00:00Z",
+      "content_text": "$CONTENT",
+      "media_files": ["demo.txt"],
+      "tags": ["demo", "sample"]
+    }
+  ],
+  "next_cursor": "$NEXT_CURSOR"
+}
+JSON

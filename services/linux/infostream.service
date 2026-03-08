@@ -1,0 +1,13 @@
+[Unit]
+Description=Infostream Personal Intelligence Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/infostream-backend
+Restart=on-failure
+RestartSec=2
+Environment=INFOSTREAM_HOME=%h/.config/infostream
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,8 @@
+{
+  "Name": "Demo Source",
+  "Description": "Deterministic demo source for Infostream.",
+  "Version": "0.1.0",
+  "Interface version": "0.1.0",
+  "Developer": "Infostream",
+  "Platform": ["linux", "darwin", "windows"]
+}

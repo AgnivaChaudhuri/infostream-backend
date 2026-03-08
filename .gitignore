@@ -1,0 +1,20 @@
+.venv/
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.build/
+backend/dist/
+backend/build/
+backend/*.spec
+*.db
+
+# Node / Tauri
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+
+# Runtime data
+*.log
