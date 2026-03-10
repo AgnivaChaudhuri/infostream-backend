@@ -7,17 +7,20 @@ from typing import Any
 from infostream.models.schemas import ItemRecord
 
 
-class SummarizerProvider(ABC):
-    @abstractmethod
+# This file implements the LLM provider and summarization
+# Right now it is a stub, model will be chosen and the stub will be expanded
+
+class SummarizerProvider(ABC): # The base class for an LLM summarizer
+    @abstractmethod # summarize the list of items and output appropriately
     def summarize(self, items: list[ItemRecord], interests_text: str) -> str:
         raise NotImplementedError
 
-    @abstractmethod
+    @abstractmethod # If output is invalid (doesn't pass tests), attempt to repair it
     def repair(self, invalid_output: str, errors: list[str], items: list[ItemRecord], interests_text: str) -> str:
         raise NotImplementedError
 
 
-class StubSummarizerProvider(SummarizerProvider):
+class StubSummarizerProvider(SummarizerProvider): # The current stub (this will be replaced with another class)
     """Deterministic provider used for v1 while real model integrations are out of scope."""
 
     def summarize(self, items: list[ItemRecord], interests_text: str) -> str:

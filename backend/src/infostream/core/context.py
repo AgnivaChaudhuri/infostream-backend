@@ -16,6 +16,8 @@ from infostream.scheduler.service import SchedulerService
 from infostream.sources.executor import SourceExecutor
 from infostream.sources.manager import SourceManager
 
+# Create AppContext object for use in other files
+# stores application context/metrics/data
 
 @dataclass
 class AppContext:

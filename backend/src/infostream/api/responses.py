@@ -4,6 +4,8 @@ from typing import Any
 
 from fastapi.responses import JSONResponse
 
+# This file defines the API responses - either success, or failure, and 
+# returns the appropriate messages/data.
 
 def success(message: str, data: Any | None = None, status_code: int = 200) -> JSONResponse:
     payload: dict[str, Any] = {

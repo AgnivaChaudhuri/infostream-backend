@@ -14,9 +14,11 @@ from infostream.digest.service import DigestBusyError
 from infostream.models.schemas import InterestsRequest, InstallSourceRequest, LlmRequest, ScheduleRequest
 from infostream.sources.manager import SourceError
 
-router = APIRouter()
+# This file implements all the API endpoints
 
+router = APIRouter() # The standard API router used in FastAPI
 
+# return application context - information about the backend status
 def _ctx(request: Request) -> AppContext:
     return cast(AppContext, request.app.state.ctx)
 

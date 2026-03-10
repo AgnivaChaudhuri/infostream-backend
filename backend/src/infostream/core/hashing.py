@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import ParseResult, urlparse, urlunparse
 
+# Contains hashing functions, URL and item canonicalization,
+# and item_refs for bookkeeping
 
 def sha256_hex(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()

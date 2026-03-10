@@ -6,6 +6,9 @@ from pathlib import Path
 from infostream.core.files import atomic_write_json, read_json
 from infostream.models.schemas import LockfileRecord
 
+# This file controls writing the lockfile, the file which the frontend
+# and backend use to establish communication, containing the network port
+# whether it is running, and other things.
 
 def write_lockfile(path: Path, record: LockfileRecord) -> None:
     atomic_write_json(path, record.model_dump())

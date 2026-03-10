@@ -59,13 +59,14 @@ class DigestRunService:
     def active_sources(self) -> set[str]:
         return set(self._active_sources)
 
+    # Start a run, ensure validity
     async def launch_run(self, trigger: str) -> str:
         async with self._guard:
             if self.is_running():
                 raise DigestBusyError("digest already running")
 
             run_id = str(uuid.uuid4())
-            run = RunRecord(
+            run = RunRecord( # Add to QUEUE for scheduling
                 run_id=run_id,
                 trigger="scheduled" if trigger == "scheduled" else "manual",
                 status="queued",
@@ -78,12 +79,16 @@ class DigestRunService:
             task.add_done_callback(lambda _: self._clear_active(run_id))
             return run_id
 
+    # Clear active task/source state when run finishes
     def _clear_active(self, run_id: str) -> None:
         if self._active_run_id == run_id:
             self._active_run_id = None
             self._active_task = None
             self._active_sources.clear()
 
+    # Run digest engine start to finish
+    # Mark running, execute all sources, store Items+cursors+results, build
+    # digest, persist digest, finalize run status, recompute schedule
     async def _execute_run(self, run_id: str, trigger: str) -> None:
         try:
             self._db.update_run(
@@ -99,18 +104,20 @@ class DigestRunService:
             settings = self._state_store.read_settings()
             enabled_sources = self._source_manager.list_enabled()
 
+            # Execute each source
             for source in enabled_sources:
                 self._active_sources.add(source.uid)
                 cursor = self._db.get_source_cursor(source.uid)
                 try:
                     result = await self._source_executor.execute(source, cursor)
                     ingested_count = 0
-                    for incoming in result.items:
+                    for incoming in result.items: # Canonicalize into Item
                         canonical = self._to_canonical_item(incoming, source.uid)
                         _inserted, item = self._db.upsert_item(canonical, seen_at=now_rfc3339())
                         self._db.add_run_item(run_id, item.item_ref)
                         ingested_count += 1
 
+                    # Set next cursor so source knows where it left off
                     self._db.set_source_cursor(source.uid, result.next_cursor, now_rfc3339())
                     source_result = RunSourceResult(
                         source_uid=source.uid,
@@ -119,6 +126,7 @@ class DigestRunService:
                         items_ingested_count=ingested_count,
                         stderr_tail=result.stderr_tail,
                     )
+                # If it errors
                 except SourceExecutionError as exc:
                     source_result = RunSourceResult(
                         source_uid=source.uid,
@@ -132,6 +140,7 @@ class DigestRunService:
 
                 self._db.add_run_source_result(run_id, source_result)
 
+            # Group and store digest
             run_items = self._db.get_items_for_run(run_id)
             digest_payload, raw_output, digest_error = self._build_digest(run_items, settings)
             digest_id = str(uuid.uuid4())
@@ -144,6 +153,7 @@ class DigestRunService:
             )
             self._db.create_digest(digest)
 
+            # Finalize run status and update the DB
             finished_at = now_rfc3339()
             self._db.update_run(
                 run_id,
@@ -156,7 +166,7 @@ class DigestRunService:
             )
 
             self._recompute_schedule(settings, trigger, finished_at)
-        except Exception as exc:
+        except Exception as exc: # If run fails
             self._db.update_run(
                 run_id,
                 status="failed",
@@ -167,39 +177,43 @@ class DigestRunService:
                 raw_llm_output=None,
             )
 
-    def _build_digest(
+    def _build_digest( # Multi line function definition
         self,
         items: list[ItemRecord],
         settings: SettingsRecord,
-    ) -> tuple[dict[str, Any], str, tuple[str, str] | None]:
+    ) -> tuple[dict[str, Any], str, tuple[str, str] | None]: # Build the digest, output is payload, output, and error code
         raw_output = self._summarizer.summarize(items, settings.interests)
         payload, errors = self._parse_and_validate(raw_output, items)
         if not errors and payload is not None:
-            return payload, raw_output, None
+            return payload, raw_output, None # If it succeeds, return relevant info
 
+        # Repair if necesssary
         repair_raw = self._summarizer.repair(raw_output, errors, items, settings.interests)
         repaired_payload, repaired_errors = self._parse_and_validate(repair_raw, items)
         if not repaired_errors and repaired_payload is not None:
             return repaired_payload, repair_raw, None
 
+        # If it STILL fails, then return an error message
         fallback = self._fallback_digest(items, settings)
         joined_errors = "; ".join(repaired_errors if repaired_errors else errors)
         return fallback, raw_output, ("LLM_SCHEMA_INVALID_FALLBACK", joined_errors)
 
-    def _parse_and_validate(
-        self,
+    def _parse_and_validate( # Multi line function definition
+        self, # Validate JSON and citations
         raw_output: str,
         items: list[ItemRecord],
     ) -> tuple[dict[str, Any] | None, list[str]]:
-        try:
+        try: # Parse JSON and error if fail
             payload = json.loads(raw_output)
         except json.JSONDecodeError as exc:
             return None, [f"invalid JSON: {exc}"]
 
+        # Validate digest JSON
         schema_errors = validate_digest_schema(payload)
         if schema_errors:
             return payload, schema_errors
 
+        # Validate citations
         valid_refs = {item.item_ref for item in items}
         citation_errors = validate_citations(payload, valid_refs)
         if citation_errors:
@@ -207,13 +221,15 @@ class DigestRunService:
 
         return payload, []
 
+    # Fallback digest if initial digest has errors
+    # Currently deterministic - must implement in real
     def _fallback_digest(self, items: list[ItemRecord], settings: SettingsRecord) -> dict[str, Any]:
         interest_names = self._parse_interests(settings.interests)
         refs = [item.item_ref for item in items[:5]]
         interest_payload: dict[str, list[dict[str, Any]]] = {}
         for name in interest_names:
             bullets: list[dict[str, Any]] = []
-            if items:
+            if items: # If items exist in LLM output
                 for item in items[:3]:
                     text = item.title or item.content_text or item.url or item.item_ref
                     bullets.append(
@@ -223,7 +239,7 @@ class DigestRunService:
                             "confidence": "low",
                         }
                     )
-            else:
+            else: # If empty
                 bullets.append(
                     {
                         "text": "No items were ingested for this run.",
@@ -233,7 +249,7 @@ class DigestRunService:
                 )
             interest_payload[name] = bullets
 
-        return {
+        return { # Return output digest JSON
             "version": "0.1.0",
             "new_communications": {},
             "important_dates_events": [],
@@ -245,10 +261,13 @@ class DigestRunService:
         }
 
     def _parse_interests(self, interests_text: str) -> list[str]:
+        # Interests currently formatted as a list of newline-separated and comma separated
+        # interests - THIS SHOULD BE CHANGED
         names = [part.strip() for part in interests_text.replace("\n", ",").split(",")]
         clean = [name for name in names if name]
         return clean if clean else ["general"]
 
+    # Normalize incoming item from digest into an Item for the DB
     def _to_canonical_item(self, incoming: IncomingItem, source_uid: str) -> ItemRecord:
         text = incoming.content_text or ""
         c_hash = content_hash(text)
@@ -273,6 +292,7 @@ class DigestRunService:
             tags=incoming.tags,
         )
 
+    # After a run, determine the next run time/schedule
     def _recompute_schedule(self, settings: SettingsRecord, trigger: str, finished_at: str) -> None:
         if settings.run_every and settings.spacing > 0:
             finished = parse_rfc3339(finished_at)

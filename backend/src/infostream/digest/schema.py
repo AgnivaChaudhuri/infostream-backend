@@ -5,6 +5,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+# LLM digest JSON schema - how JSON output should be formatted
+
 DIGEST_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": [
@@ -84,9 +86,11 @@ def validate_digest_schema(payload: dict[str, Any]) -> list[str]:
     return errors
 
 
+# Ensure source_refs point to ingested run item_refs
 def validate_citations(payload: dict[str, Any], valid_item_refs: set[str]) -> list[str]:
     errors: list[str] = []
 
+    # Validate for regular info and items
     interests = payload.get("interests", {})
     if isinstance(interests, dict):
         for interest_name, bullets in interests.items():
@@ -105,6 +109,7 @@ def validate_citations(payload: dict[str, Any], valid_item_refs: set[str]) -> li
                             f"interest '{interest_name}' bullet {index} contains unknown ref {ref}"
                         )
 
+    # Validate for entities and relations
     for field in ("entities", "relations"):
         for index, item in enumerate(_as_list(payload.get(field))):
             if not isinstance(item, dict):

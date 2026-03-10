@@ -9,6 +9,8 @@ import uvicorn
 from infostream.core.config import BackendConfig
 from infostream.main import create_app
 
+# This file is the CLI entry point and implements the ports/CLI entry
+# and argument parsing functions
 
 def _find_free_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

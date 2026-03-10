@@ -28,6 +28,9 @@ class Database:
             self._conn.close()
 
     def init_schema(self) -> None:
+        # Create tables and indexes
+        # items, runs, run_source_results, run_items, digests, source_state
+        # Triple quotes might have to be changed? Test and see
         with self._lock, self._conn:
             self._conn.executescript(
                 """
@@ -107,6 +110,7 @@ class Database:
             )
 
     def _row_to_item(self, row: sqlite3.Row) -> ItemRecord:
+        # Return the item in the DB at the given row
         return ItemRecord(
             item_ref=row["item_ref"],
             source_uid=row["source_uid"],
@@ -122,6 +126,8 @@ class Database:
         )
 
     def _lookup_duplicate(self, item: ItemRecord) -> sqlite3.Row | None:
+        # Determine whether item already exists in the database
+        # based on its ItemRecord. Test in order: external_id, url, content_hash
         cur = self._conn.cursor()
         if item.external_id:
             row = cur.execute(
@@ -145,9 +151,10 @@ class Database:
         ).fetchone()
 
     def upsert_item(self, item: ItemRecord, seen_at: str) -> tuple[bool, ItemRecord]:
+        # Insert new item if new, or update last_seen_at if duplicate
         with self._lock, self._conn:
             existing = self._lookup_duplicate(item)
-            if existing is not None:
+            if existing is not None: # If duplicate, update metadata
                 self._conn.execute(
                     """
                     UPDATE items
@@ -171,7 +178,7 @@ class Database:
                 assert row is not None
                 return False, self._row_to_item(row)
 
-            self._conn.execute(
+            self._conn.execute( # If not in DB then insert the item into the DB anew
                 """
                 INSERT INTO items (
                     item_ref, source_uid, external_id, url, title, created_at,
@@ -197,6 +204,7 @@ class Database:
             assert row is not None
             return True, self._row_to_item(row)
 
+    # Link item to run
     def add_run_item(self, run_id: str, item_ref: str) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -204,6 +212,7 @@ class Database:
                 (run_id, item_ref),
             )
 
+    # Get the items that were produced during a given run
     def get_items_for_run(self, run_id: str) -> list[ItemRecord]:
         with self._lock:
             rows = self._conn.execute(
@@ -217,6 +226,7 @@ class Database:
             ).fetchall()
         return [self._row_to_item(row) for row in rows]
 
+    # Create a record of a run
     def create_run(self, run: RunRecord) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -239,6 +249,7 @@ class Database:
                 ),
             )
 
+    # Update run status and fields if a run is already in the DB
     def update_run(
         self,
         run_id: str,
@@ -261,6 +272,7 @@ class Database:
                 (status, finished_at, digest_id, error_code, error_message, raw_llm_output, run_id),
             )
 
+    # Get the run which corresponds to a given run_id
     def get_run(self, run_id: str) -> RunRecord | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
@@ -278,6 +290,7 @@ class Database:
             raw_llm_output=row["raw_llm_output"],
         )
 
+    # Fetch the latest run
     def get_latest_run(self) -> RunRecord | None:
         with self._lock:
             row = self._conn.execute(
@@ -297,6 +310,7 @@ class Database:
             raw_llm_output=row["raw_llm_output"],
         )
 
+    # Store the post-run result FROM A GIVEN SOURCE into the DB
     def add_run_source_result(self, run_id: str, result: RunSourceResult) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -315,6 +329,7 @@ class Database:
                 ),
             )
 
+    # Fetch the results from a given run and source
     def list_run_source_results(self, run_id: str) -> list[RunSourceResult]:
         with self._lock:
             rows = self._conn.execute(
@@ -337,6 +352,7 @@ class Database:
             for row in rows
         ]
 
+    # Store the output JSON from a digest into DB
     def create_digest(self, digest: DigestRecord) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -353,6 +369,7 @@ class Database:
                 ),
             )
 
+    # Fetch the latest digest
     def get_current_digest(self) -> DigestRecord | None:
         with self._lock:
             row = self._conn.execute(
@@ -368,6 +385,7 @@ class Database:
             output_json=json.loads(row["output_json"]),
         )
 
+    # List all the digests, from newest to oldest
     def list_digest_history(self) -> list[DigestRecord]:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM digests ORDER BY created_at DESC").fetchall()
@@ -382,6 +400,7 @@ class Database:
             for row in rows
         ]
 
+    # Update or insert a source cursor - ensure that a source knows where it left off
     def set_source_cursor(self, source_uid: str, next_cursor: str | None, updated_at: str) -> None:
         with self._lock, self._conn:
             self._conn.execute(
@@ -394,6 +413,7 @@ class Database:
                 (source_uid, next_cursor, updated_at),
             )
 
+    # Read the source cursor
     def get_source_cursor(self, source_uid: str) -> str | None:
         with self._lock:
             row = self._conn.execute(
@@ -404,6 +424,7 @@ class Database:
             return None
         return row["next_cursor"]
 
+    # Look up an item by its citation metadata
     def get_items_by_refs(self, refs: list[str]) -> list[dict[str, Any]]:
         if not refs:
             return []
@@ -429,6 +450,7 @@ class Database:
             )
         return ordered
 
+    # Check whether a source is participating in a queued or running run
     def run_is_active_for_source(self, source_uid: str) -> bool:
         with self._lock:
             row = self._conn.execute(

@@ -14,9 +14,10 @@ from infostream.core.config import BackendConfig
 from infostream.core.hashing import sha256_hex
 from infostream.models.schemas import IncomingItem, SourceOutput, SourceRecord
 
+# This file is the executer for sources - it runs src_exec and manages outputs
 
 @dataclass
-class SourceExecutionResult:
+class SourceExecutionResult: # Container for source execution output
     source_uid: str
     status: str
     duration_ms: int
@@ -25,7 +26,7 @@ class SourceExecutionResult:
     next_cursor: str | None
 
 
-class SourceExecutionError(Exception):
+class SourceExecutionError(Exception): # Container for source execution error
     def __init__(self, message: str, stderr_tail: str, duration_ms: int) -> None:
         self.message = message
         self.stderr_tail = stderr_tail
@@ -38,6 +39,7 @@ class SourceExecutor:
         self._config = config
         self._media_root = media_root
 
+    # Execute src_exec with timeout, validate caps, parse ourput, ingest media, and return parsed result
     async def execute(self, source: SourceRecord, cursor: str | None) -> SourceExecutionResult:
         source_dir = Path(source.exec_path)
         exec_path = source_dir / "src_exec"
@@ -45,7 +47,7 @@ class SourceExecutor:
             raise SourceExecutionError("src_exec not found", "src_exec missing", 0)
 
         argv = [str(exec_path)]
-        if cursor:
+        if cursor: # Check where last left off (cursor)
             argv.extend(["--cursor", cursor])
 
         started = time.monotonic()
@@ -65,7 +67,7 @@ class SourceExecutor:
                 proc.communicate(),
                 timeout=self._config.graceful_source_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError: # If initial timeout, send SIGTERM to gently terminate
             timed_out = True
             proc.terminate()
             try:
@@ -74,7 +76,7 @@ class SourceExecutor:
                     timeout=self._config.hard_source_timeout_seconds
                     - self._config.graceful_source_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError: # If hard timeout, send SIGKILL to forcefully terminate process
                 self._kill_process_tree(proc.pid)
                 stdout_bytes, stderr_bytes = await proc.communicate()
 
@@ -82,10 +84,10 @@ class SourceExecutor:
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
         stderr_tail = stderr_text[-2000:]
 
-        if timed_out:
+        if timed_out: # Whether gracefully or forcefully
             raise SourceExecutionError("source execution timed out", stderr_tail, duration_ms)
 
-        if proc.returncode != 0:
+        if proc.returncode != 0: # If source concluded with error
             message = f"source exited with non-zero status {proc.returncode}"
             raise SourceExecutionError(message, stderr_tail, duration_ms)
 
@@ -102,6 +104,7 @@ class SourceExecutor:
             next_cursor=output.next_cursor,
         )
 
+    # Ensure that src_output.json and src_media directory are appropriate size ( < 5 and 200 MB)
     def _validate_output_size(self, source_dir: Path) -> None:
         output_json = source_dir / "src_output.json"
         if not output_json.exists() or not output_json.is_file():
@@ -118,6 +121,7 @@ class SourceExecutor:
             if total > self._config.source_media_max_bytes:
                 raise SourceExecutionError("src_media exceeds size cap", "media exceeds cap", 0)
 
+    # Parse and validate src_output.json
     def _load_source_output(self, source_dir: Path) -> SourceOutput:
         try:
             raw = (source_dir / "src_output.json").read_text(encoding="utf-8")
@@ -127,10 +131,12 @@ class SourceExecutor:
         except ValidationError as exc:
             raise SourceExecutionError(f"invalid src_output.json: {exc}", str(exc), 0) from exc
 
+    # Hash and copy media into lt_media and map media files to media_refs
     def _ingest_media(self, source_dir: Path, output: SourceOutput) -> None:
         media_dir = source_dir / "src_media"
         media_lookup: dict[str, str] = {}
 
+        # Hash and copy media
         if media_dir.exists() and media_dir.is_dir():
             for media_path in media_dir.rglob("*"):
                 if not media_path.is_file():
@@ -143,6 +149,7 @@ class SourceExecutor:
                     out_path.write_bytes(content)
                 media_lookup[media_path.name] = media_hash
 
+        # Map media files to media refs
         for item in output.items:
             refs: list[str] = list(item.media_refs)
             for name in item.media_files:
@@ -151,6 +158,7 @@ class SourceExecutor:
                     refs.append(media_hash)
             item.media_refs = refs
 
+    # For force killing timed out source
     def _kill_process_tree(self, pid: int | None) -> None:
         if pid is None:
             return

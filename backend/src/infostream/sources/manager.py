@@ -13,6 +13,7 @@ from infostream.core.paths import BackendPaths
 from infostream.core.validation import is_semver
 from infostream.models.schemas import InstalledSourcesRecord, SourceInfo, SourceRecord
 
+# This file manages sources - their installation, enablement, etc.
 
 class SourceError(Exception):
     def __init__(self, message: str, error_code: str, status_code: int) -> None:
@@ -26,27 +27,29 @@ class SourceManager:
     def __init__(self, paths: BackendPaths) -> None:
         self._paths = paths
 
-    def _load(self) -> InstalledSourcesRecord:
+    def _load(self) -> InstalledSourcesRecord: # load sources from installed_sources.json
         data = read_json(self._paths.installed_sources)
         return InstalledSourcesRecord.model_validate(data)
 
-    def _save(self, record: InstalledSourcesRecord) -> None:
+    def _save(self, record: InstalledSourcesRecord) -> None: # Save source JSON to record
         atomic_write_json(self._paths.installed_sources, record.model_dump())
 
-    def list_installed(self) -> list[SourceRecord]:
+    def list_installed(self) -> list[SourceRecord]: # list installed sources
         record = self._load()
         return record.sources
 
-    def list_enabled(self) -> list[SourceRecord]:
+    def list_enabled(self) -> list[SourceRecord]: # list enabled sources
         return [source for source in self.list_installed() if source.enabled]
 
-    def get_source(self, source_uid: str) -> SourceRecord | None:
+    def get_source(self, source_uid: str) -> SourceRecord | None: # Lookup the source by source_uid
         for source in self.list_installed():
             if source.uid == source_uid:
                 return source
         return None
 
-    def enable(self, source_uid: str) -> SourceRecord:
+
+    # enable source but check if it supports user's platform 
+    def enable(self, source_uid: str) -> SourceRecord: 
         record = self._load()
         source = next((item for item in record.sources if item.uid == source_uid), None)
         if source is None:
@@ -63,7 +66,7 @@ class SourceManager:
         self._save(record)
         return source
 
-    def disable(self, source_uid: str) -> SourceRecord:
+    def disable(self, source_uid: str) -> SourceRecord: # Disable a source
         record = self._load()
         source = next((item for item in record.sources if item.uid == source_uid), None)
         if source is None:
@@ -76,6 +79,8 @@ class SourceManager:
         self._save(record)
         return source
 
+    # Install a source - first ensure the package follows a proper source format,
+    # then validate versions, then copy to the appropriate directory and start it disabled
     def install(self, source_path: Path) -> SourceRecord:
         if not source_path.exists() or not source_path.is_dir():
             raise SourceError("Source directory is invalid", "INVALID_SOURCE_PACKAGE", 400)
@@ -85,6 +90,7 @@ class SourceManager:
         if not src_info_path.exists() or not src_exec_path.exists():
             raise SourceError("Source package missing required files", "INVALID_SOURCE_STRUCTURE", 422)
 
+        # Source metadata checked here
         try:
             info_data = json.loads(src_info_path.read_text(encoding="utf-8"))
             info = self._parse_source_info(info_data)
@@ -95,6 +101,7 @@ class SourceManager:
                 422,
             ) from exc
 
+        # Check source versioning - is it valid format?
         if not is_semver(info.version) or not is_semver(info.interface_version):
             raise SourceError(
                 "Source version fields must be SemVer strings",
@@ -113,7 +120,7 @@ class SourceManager:
         install_dir = self._paths.sources_dir / source_uid
         try:
             shutil.copytree(source_path, install_dir)
-        except OSError as exc:
+        except OSError as exc: # If something fails due to system constraints
             raise SourceError(f"Source install failed: {exc}", "INSTALL_FAILED", 500) from exc
 
         source = SourceRecord(
@@ -131,6 +138,8 @@ class SourceManager:
         self._save(record)
         return source
 
+    # Uninstall source, remove src directory and DB entry
+    # Source must not be active - if it is, this function will error
     def uninstall(self, source_uid: str, *, in_use: bool = False) -> None:
         if in_use:
             raise SourceError("Source is currently in use", "SOURCE_IN_USE", 409)
@@ -149,6 +158,7 @@ class SourceManager:
         del record.sources[index]
         self._save(record)
 
+    # Parse source info, accept both snake_case and Uppercase metadata
     def _parse_source_info(self, info_data: dict[str, object]) -> SourceInfo:
         if "Name" in info_data:
             return SourceInfo.model_validate(info_data)

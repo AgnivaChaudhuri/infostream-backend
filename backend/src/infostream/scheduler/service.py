@@ -45,6 +45,7 @@ class SchedulerService:
             pass
         self._task = None
 
+    # Stabilization delay, then periodic tick
     async def _loop(self) -> None:
         await asyncio.sleep(self._config.startup_stabilization_seconds)
         while not self._stopped.is_set():
@@ -55,6 +56,8 @@ class SchedulerService:
                 pass
             await asyncio.sleep(self._config.scheduler_tick_seconds)
 
+    # Read schedule, parse and compare current and scheduled time, prevent
+    # duplicate runs, launch run unless busy
     async def _tick(self) -> None:
         settings = self._state_store.read_settings()
         schedule_value = settings.schedule

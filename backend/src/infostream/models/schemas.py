@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Contains JSON schemas and formats for various data types
 
 class ApiEnvelope(BaseModel):
     ok: bool

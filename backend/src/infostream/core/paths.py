@@ -7,6 +7,11 @@ from pathlib import Path
 
 from infostream.core.config import BackendConfig
 
+# This file contains path information and modifies paths on
+# a per-OS level, it stores many paths using BackendPaths
+# much like how the config.py works. Division operator is
+# overloaded with pathlib so it resolves to path names
+# instead of division.
 
 @dataclass(frozen=True)
 class BackendPaths:

@@ -5,6 +5,9 @@ from datetime import datetime
 
 from dateutil import parser
 
+# Ensure that strings are valid format, both semantic versions
+# and date/time as RFC3339 string
+
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
 

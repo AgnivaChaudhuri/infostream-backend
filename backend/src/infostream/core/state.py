@@ -4,6 +4,8 @@ from infostream.core.files import atomic_write_json, read_json
 from infostream.core.paths import BackendPaths
 from infostream.models.schemas import SettingsRecord
 
+# some abstractions for reading/writing settings and seeing
+# the application's current state
 
 class StateStore:
     def __init__(self, paths: BackendPaths) -> None:

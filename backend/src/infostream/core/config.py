@@ -5,6 +5,7 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# This file contains config settings for the backend, particularly for development purposes
 
 class BackendConfig(BaseSettings):
     """Runtime configuration with env overrides for local development/tests."""

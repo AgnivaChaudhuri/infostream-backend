@@ -4,6 +4,7 @@ import logging
 
 import structlog
 
+# Configures logging
 
 _def_configured = False
 
