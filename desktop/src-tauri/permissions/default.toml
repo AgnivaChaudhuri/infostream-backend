@@ -1,4 +1,4 @@
 [[permission]]
-identifier = "default"
-description = "Default app command permissions"
+identifier = "allow-bootstrap-backend"
+description = "Allow invoking bootstrap backend command"
 commands.allow = ["bootstrap_backend"]

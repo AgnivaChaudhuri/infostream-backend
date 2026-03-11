@@ -20,10 +20,14 @@ backend-build:
 	$(UV) run --project $(BACKEND_DIR) --directory $(BACKEND_DIR) \
 		pyinstaller --onefile --name infostream-backend --paths src src/infostream/cli.py \
 		--distpath ../$(DESKTOP_DIR)/src-tauri/bin --workpath ../.build/pyinstaller/work --specpath ../.build/pyinstaller/spec
+	TARGET_TRIPLE="$$(rustc -vV | sed -n 's/^host: //p')"; \
+	if [ -n "$$TARGET_TRIPLE" ]; then \
+		cp $(DESKTOP_DIR)/src-tauri/bin/infostream-backend $(DESKTOP_DIR)/src-tauri/bin/infostream-backend-$$TARGET_TRIPLE; \
+	fi
 
 
 desktop-dev:
-	cd $(DESKTOP_DIR) && $(NPM) run tauri dev
+	cd $(DESKTOP_DIR) && env -u LD_LIBRARY_PATH -u SNAP -u SNAP_NAME -u SNAP_REVISION -u SNAP_ARCH $(NPM) run tauri dev
 
 desktop-test:
 	cd $(DESKTOP_DIR) && $(NPM) run test

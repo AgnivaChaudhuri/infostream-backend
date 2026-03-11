@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Default app command permissions",
+          "description": "Allow invoking bootstrap backend command",
           "type": "string",
-          "const": "default",
-          "markdownDescription": "Default app command permissions"
+          "const": "allow-bootstrap-backend",
+          "markdownDescription": "Allow invoking bootstrap backend command"
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
