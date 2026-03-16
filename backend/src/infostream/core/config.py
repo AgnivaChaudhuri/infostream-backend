@@ -26,6 +26,7 @@ class BackendConfig(BaseSettings):
 
     source_json_max_bytes: int = 5 * 1024 * 1024
     source_media_max_bytes: int = 200 * 1024 * 1024
+    items_lookup_max_refs: int = 500
 
     graceful_source_timeout_seconds: int = 300
     hard_source_timeout_seconds: int = 600

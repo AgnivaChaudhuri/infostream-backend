@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""HTTP route handlers for Infostream's backend API surface."""
+
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -11,16 +13,44 @@ from infostream.api.responses import error, success
 from infostream.core.context import AppContext
 from infostream.core.validation import parse_rfc3339
 from infostream.digest.service import DigestBusyError
-from infostream.models.schemas import InterestsRequest, InstallSourceRequest, LlmRequest, ScheduleRequest
+from infostream.models.schemas import InstallSourceRequest, LlmRequest, ScheduleRequest
 from infostream.sources.manager import SourceError
 
 # This file implements all the API endpoints
 
 router = APIRouter() # The standard API router used in FastAPI
 
-# return application context - information about the backend status
+
 def _ctx(request: Request) -> AppContext:
+    """Return typed application context from FastAPI state."""
     return cast(AppContext, request.app.state.ctx)
+
+
+def _parse_interests_payload(raw_body: bytes) -> str:
+    """Parse and validate interests payload with strict 400-style semantics.
+
+    This path intentionally avoids FastAPI/Pydantic auto-validation so malformed
+    payloads map to the PDF-required INVALID_INTERESTS response.
+    """
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Request body must be valid JSON") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("Payload must be a JSON object")
+    interests = data.get("interests")
+    if not isinstance(interests, str):
+        raise ValueError("interests must be a string")
+    return interests
+
+
+def _parse_refs_query(refs: str, max_refs: int) -> list[str]:
+    """Parse comma-separated item refs and enforce a hard cap."""
+    refs_list = [part.strip() for part in refs.split(",") if part.strip()]
+    if len(refs_list) > max_refs:
+        raise ValueError(f"refs exceeds max size of {max_refs}")
+    return refs_list
 
 
 @router.get("/health")
@@ -112,16 +142,20 @@ async def interests_get(request: Request) -> Any:
 
 
 @router.put("/interests")
-async def interests_put(request: Request, payload: InterestsRequest) -> Any:
+async def interests_put(request: Request) -> Any:
+    """Update free-form interests text with strict payload validation."""
     ctx = _ctx(request)
-    if not isinstance(payload.interests, str):
-        return error("Interests payload is invalid", "INVALID_INTERESTS", 400)
+    try:
+        raw_body = await request.body()
+        interests = _parse_interests_payload(raw_body)
+    except ValueError as exc:
+        return error(str(exc), "INVALID_INTERESTS", 400)
 
     try:
         settings = ctx.state_store.read_settings()
-        settings.interests = payload.interests
+        settings.interests = interests
         ctx.state_store.write_settings(settings)
-        return success("Interests updated", {"interests": payload.interests})
+        return success("Interests updated", {"interests": interests})
     except OSError:
         return error("Failed to write settings", "INTERNAL_ERROR", 500)
 
@@ -237,7 +271,11 @@ async def runs_get(request: Request, run_id: str) -> Any:
 
 @router.get("/items")
 async def items_lookup(request: Request, refs: str = Query(default="")) -> Any:
+    """Resolve item_ref citations into source/title/url metadata."""
     ctx = _ctx(request)
-    refs_list = [part.strip() for part in refs.split(",") if part.strip()]
+    try:
+        refs_list = _parse_refs_query(refs, ctx.config.items_lookup_max_refs)
+    except ValueError as exc:
+        return error(str(exc), "INVALID_REFS", 422)
     items = ctx.db.get_items_by_refs(refs_list)
     return success("Items loaded", {"items": items})
