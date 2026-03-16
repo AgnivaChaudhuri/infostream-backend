@@ -162,9 +162,9 @@ class SourceExecutor:
         for item in output.items:
             refs: list[str] = list(item.media_refs)
             for name in item.media_files:
-                media_hash = media_lookup.get(name)
-                if media_hash and media_hash not in refs:
-                    refs.append(media_hash)
+                resolved_media_hash = media_lookup.get(name)
+                if resolved_media_hash and resolved_media_hash not in refs:
+                    refs.append(resolved_media_hash)
             item.media_refs = refs
 
     def _kill_process_tree(self, pid: int | None) -> None:
