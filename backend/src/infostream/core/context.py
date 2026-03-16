@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Application context assembly and lifecycle wiring for backend subsystems."""
+
 import os
 from dataclasses import dataclass
 
@@ -16,11 +18,10 @@ from infostream.scheduler.service import SchedulerService
 from infostream.sources.executor import SourceExecutor
 from infostream.sources.manager import SourceManager
 
-# Create AppContext object for use in other files
-# stores application context/metrics/data
-
 @dataclass
 class AppContext:
+    """Container for all long-lived backend services and state handles."""
+
     config: BackendConfig
     paths: BackendPaths
     db: Database
@@ -52,11 +53,12 @@ class AppContext:
 
 
 def create_context(config: BackendConfig, port: int) -> AppContext:
+    """Create and wire all backend services for one daemon process."""
     paths = build_paths(config)
     paths.root.mkdir(parents=True, exist_ok=True)
     db = Database(paths.db)
     state_store = StateStore(paths)
-    source_manager = SourceManager(paths)
+    source_manager = SourceManager(paths, config)
     source_executor = SourceExecutor(config=config, media_root=paths.media_dir)
 
     digest_service = DigestRunService(

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Source package lifecycle management.
+
+This module validates, installs, enables, disables, and uninstalls source
+extensions defined by the Infostream source package contract.
+"""
+
 import json
 import platform
 import shutil
@@ -8,14 +14,15 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from infostream.core.config import BackendConfig
 from infostream.core.files import atomic_write_json, read_json
 from infostream.core.paths import BackendPaths
 from infostream.core.validation import is_semver
 from infostream.models.schemas import InstalledSourcesRecord, SourceInfo, SourceRecord
 
-# This file manages sources - their installation, enablement, etc.
-
 class SourceError(Exception):
+    """Uniform source-lifecycle error with API-friendly metadata."""
+
     def __init__(self, message: str, error_code: str, status_code: int) -> None:
         self.message = message
         self.error_code = error_code
@@ -24,32 +31,39 @@ class SourceError(Exception):
 
 
 class SourceManager:
-    def __init__(self, paths: BackendPaths) -> None:
-        self._paths = paths
+    """Persistent source registry and install-time package validator."""
 
-    def _load(self) -> InstalledSourcesRecord: # load sources from installed_sources.json
+    def __init__(self, paths: BackendPaths, config: BackendConfig) -> None:
+        self._paths = paths
+        self._config = config
+
+    def _load(self) -> InstalledSourcesRecord:
+        """Load installed source registry from disk."""
         data = read_json(self._paths.installed_sources)
         return InstalledSourcesRecord.model_validate(data)
 
-    def _save(self, record: InstalledSourcesRecord) -> None: # Save source JSON to record
+    def _save(self, record: InstalledSourcesRecord) -> None:
+        """Persist installed source registry atomically."""
         atomic_write_json(self._paths.installed_sources, record.model_dump())
 
-    def list_installed(self) -> list[SourceRecord]: # list installed sources
+    def list_installed(self) -> list[SourceRecord]:
+        """Return all installed sources."""
         record = self._load()
         return record.sources
 
-    def list_enabled(self) -> list[SourceRecord]: # list enabled sources
+    def list_enabled(self) -> list[SourceRecord]:
+        """Return enabled sources only."""
         return [source for source in self.list_installed() if source.enabled]
 
-    def get_source(self, source_uid: str) -> SourceRecord | None: # Lookup the source by source_uid
+    def get_source(self, source_uid: str) -> SourceRecord | None:
+        """Look up a source by backend-assigned source UID."""
         for source in self.list_installed():
             if source.uid == source_uid:
                 return source
         return None
 
-
-    # enable source but check if it supports user's platform 
-    def enable(self, source_uid: str) -> SourceRecord: 
+    def enable(self, source_uid: str) -> SourceRecord:
+        """Enable a source if it exists and supports the current platform."""
         record = self._load()
         source = next((item for item in record.sources if item.uid == source_uid), None)
         if source is None:
@@ -66,7 +80,8 @@ class SourceManager:
         self._save(record)
         return source
 
-    def disable(self, source_uid: str) -> SourceRecord: # Disable a source
+    def disable(self, source_uid: str) -> SourceRecord:
+        """Disable an enabled source."""
         record = self._load()
         source = next((item for item in record.sources if item.uid == source_uid), None)
         if source is None:
@@ -79,9 +94,8 @@ class SourceManager:
         self._save(record)
         return source
 
-    # Install a source - first ensure the package follows a proper source format,
-    # then validate versions, then copy to the appropriate directory and start it disabled
     def install(self, source_path: Path) -> SourceRecord:
+        """Validate and install a source package into the internal source root."""
         if not source_path.exists() or not source_path.is_dir():
             raise SourceError("Source directory is invalid", "INVALID_SOURCE_PACKAGE", 400)
 
@@ -90,7 +104,7 @@ class SourceManager:
         if not src_info_path.exists() or not src_exec_path.exists():
             raise SourceError("Source package missing required files", "INVALID_SOURCE_STRUCTURE", 422)
 
-        # Source metadata checked here
+        # Parse source metadata and validate schema-level requirements.
         try:
             info_data = json.loads(src_info_path.read_text(encoding="utf-8"))
             info = self._parse_source_info(info_data)
@@ -101,10 +115,16 @@ class SourceManager:
                 422,
             ) from exc
 
-        # Check source versioning - is it valid format?
+        # Enforce semver and interface compatibility requirements.
         if not is_semver(info.version) or not is_semver(info.interface_version):
             raise SourceError(
                 "Source version fields must be SemVer strings",
+                "INVALID_SOURCE_STRUCTURE",
+                422,
+            )
+        if not self._is_compatible_interface_version(info.interface_version):
+            raise SourceError(
+                "Source interface version is incompatible with this backend",
                 "INVALID_SOURCE_STRUCTURE",
                 422,
             )
@@ -138,9 +158,8 @@ class SourceManager:
         self._save(record)
         return source
 
-    # Uninstall source, remove src directory and DB entry
-    # Source must not be active - if it is, this function will error
     def uninstall(self, source_uid: str, *, in_use: bool = False) -> None:
+        """Remove a source package from disk and source registry."""
         if in_use:
             raise SourceError("Source is currently in use", "SOURCE_IN_USE", 409)
 
@@ -158,8 +177,8 @@ class SourceManager:
         del record.sources[index]
         self._save(record)
 
-    # Parse source info, accept both snake_case and Uppercase metadata
     def _parse_source_info(self, info_data: dict[str, object]) -> SourceInfo:
+        """Parse source metadata in canonical or snake_case aliases."""
         if "Name" in info_data:
             return SourceInfo.model_validate(info_data)
 
@@ -172,3 +191,12 @@ class SourceManager:
             "Platform": info_data.get("platforms", []),
         }
         return SourceInfo.model_validate(normalized)
+
+    def _is_compatible_interface_version(self, source_interface_version: str) -> bool:
+        """Apply Option B compatibility: major versions must match."""
+        try:
+            source_major = int(source_interface_version.split(".", 1)[0])
+            backend_major = int(self._config.source_interface_version.split(".", 1)[0])
+        except ValueError:
+            return False
+        return source_major == backend_major

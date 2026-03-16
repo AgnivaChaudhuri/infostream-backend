@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+"""Central runtime configuration for daemon behavior and feature toggles."""
+
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# This file contains config settings for the backend, particularly for development purposes
 
 class BackendConfig(BaseSettings):
     """Runtime configuration with env overrides for local development/tests."""
@@ -19,6 +19,7 @@ class BackendConfig(BaseSettings):
     installed_sources_filename: str = "installed_sources.json"
     sources_dirname: str = "sources"
     media_dirname: str = "lt_media"
+    source_interface_version: str = "1.0.0"
 
     startup_stabilization_seconds: int = 5
     scheduler_tick_seconds: int = 1
