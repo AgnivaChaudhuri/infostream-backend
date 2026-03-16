@@ -200,13 +200,19 @@ class DigestRunService:
         The run is allowed to succeed when fallback validates. Only fallback
         generation/validation failure escalates into a failed run.
         """
-        raw_output = self._summarizer.summarize(items, settings.interests)
+        raw_output = self._summarizer.summarize(items, settings.interests, settings.llm)
         payload, errors = self._parse_and_validate(raw_output, items)
         if not errors and payload is not None:
             return payload, raw_output, None
 
         # One repair attempt after schema/citation failure.
-        repair_raw = self._summarizer.repair(raw_output, errors, items, settings.interests)
+        repair_raw = self._summarizer.repair(
+            raw_output,
+            errors,
+            items,
+            settings.interests,
+            settings.llm,
+        )
         repaired_payload, repaired_errors = self._parse_and_validate(repair_raw, items)
         if not repaired_errors and repaired_payload is not None:
             return repaired_payload, repair_raw, None

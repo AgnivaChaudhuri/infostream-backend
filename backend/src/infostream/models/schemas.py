@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+"""Pydantic models shared across API, persistence, and digest layers."""
+
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Contains JSON schemas and formats for various data types
-
 class ApiEnvelope(BaseModel):
+    """Uniform API envelope used by all endpoints."""
+
     ok: bool
     message: str
     error_code: str | None = None
@@ -15,9 +17,11 @@ class ApiEnvelope(BaseModel):
 
 
 class LlmConfig(BaseModel):
-    name: str = "stub-local"
+    """Provider configuration for digest summarization."""
+
+    name: str = ""
     mode: Literal["local", "cloud"] = "local"
-    unique_id: str = "stub-local"
+    unique_id: str = ""
     config: dict[str, Any] = Field(default_factory=dict)
 
 

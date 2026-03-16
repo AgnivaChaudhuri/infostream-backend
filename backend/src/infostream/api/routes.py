@@ -174,9 +174,10 @@ async def llm_get(request: Request) -> Any:
 
 @router.put("/llm/current")
 async def llm_put(request: Request, payload: LlmRequest) -> Any:
+    """Store current LLM provider selection/configuration."""
     ctx = _ctx(request)
 
-    if payload.unique_id not in {"stub-local", "stub-cloud"}:
+    if not payload.unique_id.strip():
         return error("Model is not installed", "LLM_NOT_FOUND", 422)
     if payload.unique_id in ctx.config.unavailable_llm_ids:
         return error("Model is unavailable", "LLM_UNAVAILABLE", 503)

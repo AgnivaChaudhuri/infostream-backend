@@ -98,16 +98,24 @@ def test_fallback_digest_path(client: TestClient, demo_source_path: Path, monkey
 
     ctx = client.app.state.ctx
 
-    def bad_summarize(items: list[Any], interests_text: str) -> str:
+    def bad_summarize(items: list[Any], interests_text: str, llm: Any) -> str:
         _ = items
         _ = interests_text
+        _ = llm
         return "not-json"
 
-    def bad_repair(invalid_output: str, errors: list[str], items: list[Any], interests_text: str) -> str:
+    def bad_repair(
+        invalid_output: str,
+        errors: list[str],
+        items: list[Any],
+        interests_text: str,
+        llm: Any,
+    ) -> str:
         _ = invalid_output
         _ = errors
         _ = items
         _ = interests_text
+        _ = llm
         return "still-not-json"
 
     monkeypatch.setattr(ctx.digest_service._summarizer, "summarize", bad_summarize)

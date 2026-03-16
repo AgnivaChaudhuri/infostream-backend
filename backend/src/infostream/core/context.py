@@ -11,7 +11,7 @@ from infostream.core.lockfile import remove_lockfile, write_lockfile
 from infostream.core.paths import BackendPaths, build_paths
 from infostream.core.state import StateStore
 from infostream.db.database import Database
-from infostream.digest.provider import StubSummarizerProvider
+from infostream.digest.provider import ProviderRouter
 from infostream.digest.service import DigestRunService
 from infostream.models.schemas import LockfileRecord, now_rfc3339
 from infostream.scheduler.service import SchedulerService
@@ -66,7 +66,7 @@ def create_context(config: BackendConfig, port: int) -> AppContext:
         state_store=state_store,
         source_manager=source_manager,
         source_executor=source_executor,
-        summarizer=StubSummarizerProvider(),
+        summarizer=ProviderRouter(),
         config=config,
     )
     scheduler = SchedulerService(
