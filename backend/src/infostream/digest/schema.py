@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+"""Schema and provenance validation helpers for digest payloads.
+
+This module owns structural validation (jsonschema) and citation validation rules
+enforced after a model/provider returns output.
+"""
+
 from typing import Any
 
 from jsonschema import Draft202012Validator
+
+from infostream.core.validation import is_semver
 
 # LLM digest JSON schema - how JSON output should be formatted
 
@@ -82,15 +89,24 @@ _validator = Draft202012Validator(DIGEST_JSON_SCHEMA)
 
 
 def validate_digest_schema(payload: dict[str, Any]) -> list[str]:
+    """Validate payload shape and strict semver requirements."""
     errors = [error.message for error in _validator.iter_errors(payload)]
+    version = payload.get("version")
+    if not isinstance(version, str) or not is_semver(version):
+        errors.append("version must be a SemVer string")
     return errors
 
 
 # Ensure source_refs point to ingested run item_refs
 def validate_citations(payload: dict[str, Any], valid_item_refs: set[str]) -> list[str]:
+    """Validate all citations against item_refs produced by the current run.
+
+    Entities and relations are strict: every object must include a non-empty
+    source_refs array, and every ref must exist in valid_item_refs.
+    """
     errors: list[str] = []
 
-    # Validate for regular info and items
+    # Validate citation refs in interest bullets.
     interests = payload.get("interests", {})
     if isinstance(interests, dict):
         for interest_name, bullets in interests.items():
@@ -109,16 +125,20 @@ def validate_citations(payload: dict[str, Any], valid_item_refs: set[str]) -> li
                             f"interest '{interest_name}' bullet {index} contains unknown ref {ref}"
                         )
 
-    # Validate for entities and relations
+    # Validate entities/relations with strict provenance requirements.
     for field in ("entities", "relations"):
         for index, item in enumerate(_as_list(payload.get(field))):
             if not isinstance(item, dict):
                 continue
             refs = item.get("source_refs")
             if refs is None:
+                errors.append(f"{field}[{index}] is missing source_refs")
                 continue
             if not isinstance(refs, list):
                 errors.append(f"{field}[{index}] has invalid source_refs")
+                continue
+            if not refs:
+                errors.append(f"{field}[{index}] has empty source_refs")
                 continue
             for ref in refs:
                 if ref not in valid_item_refs:
@@ -128,6 +148,7 @@ def validate_citations(payload: dict[str, Any], valid_item_refs: set[str]) -> li
 
 
 def _as_list(value: Any) -> list[Any]:
+    """Convert unknown value to list for tolerant traversal."""
     if isinstance(value, list):
         return value
     return []

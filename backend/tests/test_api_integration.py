@@ -119,7 +119,7 @@ def test_fallback_digest_path(client: TestClient, demo_source_path: Path, monkey
     run_payload = _wait_for_run(client, run_id)
     run_record = run_payload["data"]["run"]
     assert run_record["status"] == "succeeded"
-    assert run_record["error_code"] == "LLM_SCHEMA_INVALID_FALLBACK"
+    assert run_record["error_code"] == "LLM_FALLBACK_USED"
 
     digest = client.get("/digest/current").json()["data"]["output_json"]
     assert "fallback" in digest["extraneous"].lower()

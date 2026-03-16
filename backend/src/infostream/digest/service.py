@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Digest orchestration service.
+
+This service enforces the single-run invariant, executes source ingestion,
+builds/validates digest output, and persists run/digest state in SQLite.
+"""
+
 import asyncio
 import json
 import uuid
@@ -31,6 +37,8 @@ class DigestBusyError(Exception):
 
 
 class DigestRunService:
+    """Coordinates ingestion + summarization for one run at a time."""
+
     def __init__(
         self,
         *,
@@ -177,43 +185,61 @@ class DigestRunService:
                 raw_llm_output=None,
             )
 
-    def _build_digest( # Multi line function definition
+    def _build_digest(
         self,
         items: list[ItemRecord],
         settings: SettingsRecord,
-    ) -> tuple[dict[str, Any], str, tuple[str, str] | None]: # Build the digest, output is payload, output, and error code
+    ) -> tuple[dict[str, Any], str, tuple[str, str] | None]:
+        """Build digest payload.
+
+        Flow:
+        1. Primary summarize + validate.
+        2. One repair attempt + validate.
+        3. Deterministic fallback generation + validate.
+
+        The run is allowed to succeed when fallback validates. Only fallback
+        generation/validation failure escalates into a failed run.
+        """
         raw_output = self._summarizer.summarize(items, settings.interests)
         payload, errors = self._parse_and_validate(raw_output, items)
         if not errors and payload is not None:
-            return payload, raw_output, None # If it succeeds, return relevant info
+            return payload, raw_output, None
 
-        # Repair if necesssary
+        # One repair attempt after schema/citation failure.
         repair_raw = self._summarizer.repair(raw_output, errors, items, settings.interests)
         repaired_payload, repaired_errors = self._parse_and_validate(repair_raw, items)
         if not repaired_errors and repaired_payload is not None:
             return repaired_payload, repair_raw, None
 
-        # If it STILL fails, then return an error message
+        # Final fallback path; this must also validate before we accept it.
         fallback = self._fallback_digest(items, settings)
-        joined_errors = "; ".join(repaired_errors if repaired_errors else errors)
-        return fallback, raw_output, ("LLM_SCHEMA_INVALID_FALLBACK", joined_errors)
+        fallback_schema_errors = validate_digest_schema(fallback)
+        fallback_citation_errors = validate_citations(
+            fallback,
+            {item.item_ref for item in items},
+        )
+        fallback_errors = fallback_schema_errors + fallback_citation_errors
+        if fallback_errors:
+            raise RuntimeError(f"fallback digest validation failed: {'; '.join(fallback_errors)}")
 
-    def _parse_and_validate( # Multi line function definition
-        self, # Validate JSON and citations
+        joined_errors = "; ".join(repaired_errors if repaired_errors else errors)
+        return fallback, raw_output, ("LLM_FALLBACK_USED", joined_errors)
+
+    def _parse_and_validate(
+        self,
         raw_output: str,
         items: list[ItemRecord],
     ) -> tuple[dict[str, Any] | None, list[str]]:
-        try: # Parse JSON and error if fail
+        """Parse raw JSON and apply schema + citation validation."""
+        try:
             payload = json.loads(raw_output)
         except json.JSONDecodeError as exc:
             return None, [f"invalid JSON: {exc}"]
 
-        # Validate digest JSON
         schema_errors = validate_digest_schema(payload)
         if schema_errors:
             return payload, schema_errors
 
-        # Validate citations
         valid_refs = {item.item_ref for item in items}
         citation_errors = validate_citations(payload, valid_refs)
         if citation_errors:
@@ -221,9 +247,8 @@ class DigestRunService:
 
         return payload, []
 
-    # Fallback digest if initial digest has errors
-    # Currently deterministic - must implement in real
     def _fallback_digest(self, items: list[ItemRecord], settings: SettingsRecord) -> dict[str, Any]:
+        """Create deterministic fallback content from current-run items."""
         interest_names = self._parse_interests(settings.interests)
         refs = [item.item_ref for item in items[:5]]
         interest_payload: dict[str, list[dict[str, Any]]] = {}
@@ -249,7 +274,7 @@ class DigestRunService:
                 )
             interest_payload[name] = bullets
 
-        return { # Return output digest JSON
+        return {
             "version": "0.1.0",
             "new_communications": {},
             "important_dates_events": [],
@@ -261,8 +286,7 @@ class DigestRunService:
         }
 
     def _parse_interests(self, interests_text: str) -> list[str]:
-        # Interests currently formatted as a list of newline-separated and comma separated
-        # interests - THIS SHOULD BE CHANGED
+        """Convert free-form interests text to normalized interest tokens."""
         names = [part.strip() for part in interests_text.replace("\n", ",").split(",")]
         clean = [name for name in names if name]
         return clean if clean else ["general"]
