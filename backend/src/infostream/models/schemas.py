@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -178,4 +178,5 @@ class DigestOutput(BaseModel):
 
 
 def now_rfc3339() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    """Return current UTC time formatted as RFC3339 without fractional seconds."""
+    return datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
