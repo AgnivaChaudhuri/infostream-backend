@@ -1,11 +1,12 @@
-from __future__ import annotations
-
 """Central runtime configuration for daemon behavior and feature toggles."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class BackendConfig(BaseSettings):
     """Runtime configuration with env overrides for local development/tests."""

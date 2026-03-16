@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Source package lifecycle management.
 
 This module validates, installs, enables, disables, and uninstalls source
 extensions defined by the Infostream source package contract.
 """
+
+from __future__ import annotations
 
 import json
 import platform
@@ -19,6 +19,7 @@ from infostream.core.files import atomic_write_json, read_json
 from infostream.core.paths import BackendPaths
 from infostream.core.validation import is_semver
 from infostream.models.schemas import InstalledSourcesRecord, SourceInfo, SourceRecord
+
 
 class SourceError(Exception):
     """Uniform source-lifecycle error with API-friendly metadata."""
@@ -74,7 +75,11 @@ class SourceManager:
 
         host_platform = platform.system().lower()
         if source.platforms and host_platform not in {p.lower() for p in source.platforms}:
-            raise SourceError("Source does not support this platform", "PLATFORM_NOT_SUPPORTED", 403)
+            raise SourceError(
+                "Source does not support this platform",
+                "PLATFORM_NOT_SUPPORTED",
+                403,
+            )
 
         source.enabled = True
         self._save(record)
@@ -102,7 +107,11 @@ class SourceManager:
         src_info_path = source_path / "src_info.json"
         src_exec_path = source_path / "src_exec"
         if not src_info_path.exists() or not src_exec_path.exists():
-            raise SourceError("Source package missing required files", "INVALID_SOURCE_STRUCTURE", 422)
+            raise SourceError(
+                "Source package missing required files",
+                "INVALID_SOURCE_STRUCTURE",
+                422,
+            )
 
         # Parse source metadata and validate schema-level requirements.
         try:
@@ -164,7 +173,10 @@ class SourceManager:
             raise SourceError("Source is currently in use", "SOURCE_IN_USE", 409)
 
         record = self._load()
-        index = next((idx for idx, item in enumerate(record.sources) if item.uid == source_uid), None)
+        index = next(
+            (idx for idx, item in enumerate(record.sources) if item.uid == source_uid),
+            None,
+        )
         if index is None:
             raise SourceError("Source not found", "SOURCE_NOT_FOUND", 404)
 
@@ -172,7 +184,11 @@ class SourceManager:
         try:
             shutil.rmtree(source.exec_path)
         except OSError as exc:
-            raise SourceError(f"Failed to uninstall source: {exc}", "UNINSTALL_FAILED", 500) from exc
+            raise SourceError(
+                f"Failed to uninstall source: {exc}",
+                "UNINSTALL_FAILED",
+                500,
+            ) from exc
 
         del record.sources[index]
         self._save(record)

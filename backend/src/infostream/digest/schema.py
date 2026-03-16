@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Schema and provenance validation helpers for digest payloads.
 
 This module owns structural validation (jsonschema) and citation validation rules
 enforced after a model/provider returns output.
 """
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -117,7 +117,9 @@ def validate_citations(payload: dict[str, Any], valid_item_refs: set[str]) -> li
                     continue
                 refs = bullet.get("source_refs")
                 if not isinstance(refs, list):
-                    errors.append(f"interest '{interest_name}' bullet {index} has invalid source_refs")
+                    errors.append(
+                        f"interest '{interest_name}' bullet {index} has invalid source_refs"
+                    )
                     continue
                 for ref in refs:
                     if ref not in valid_item_refs:

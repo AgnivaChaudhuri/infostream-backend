@@ -1,11 +1,12 @@
-from __future__ import annotations
-
 """Hashing helpers for content hashes and stable item references."""
+
+from __future__ import annotations
 
 import hashlib
 from urllib.parse import ParseResult, urlparse, urlunparse
 
 from infostream.core.text_normalization import normalize_text_for_hashing
+
 
 def sha256_hex(value: bytes) -> str:
     """Return lowercase SHA-256 hex digest."""

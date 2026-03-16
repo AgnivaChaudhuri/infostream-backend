@@ -1,14 +1,13 @@
-from __future__ import annotations
-
 """Source execution runtime.
 
 This module executes source binaries, validates source output limits, ingests
 media into local cache, and applies cache-retention policy.
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
-import shutil
 import signal
 import time
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from pydantic import ValidationError
 from infostream.core.config import BackendConfig
 from infostream.core.hashing import sha256_hex
 from infostream.models.schemas import IncomingItem, SourceOutput, SourceRecord
+
 
 @dataclass
 class SourceExecutionResult:
@@ -77,7 +77,7 @@ class SourceExecutor:
                 proc.communicate(),
                 timeout=self._config.graceful_source_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             timed_out = True
             proc.terminate()
             try:
@@ -86,7 +86,7 @@ class SourceExecutor:
                     timeout=self._config.hard_source_timeout_seconds
                     - self._config.graceful_source_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._kill_process_tree(proc.pid)
                 stdout_bytes, stderr_bytes = await proc.communicate()
 

@@ -1,15 +1,15 @@
-from __future__ import annotations
-
 """Digest orchestration service.
 
 This service enforces the single-run invariant, executes source ingestion,
 builds/validates digest output, and persists run/digest state in SQLite.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, timedelta
 from typing import Any
 
 from infostream.core.config import BackendConfig

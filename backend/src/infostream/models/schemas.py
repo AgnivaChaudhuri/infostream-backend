@@ -1,11 +1,12 @@
-from __future__ import annotations
-
 """Pydantic models shared across API, persistence, and digest layers."""
+
+from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
 
 class ApiEnvelope(BaseModel):
     """Uniform API envelope used by all endpoints."""

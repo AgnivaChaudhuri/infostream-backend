@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Summarizer provider interfaces and provider selection implementations.
 
 The digest service relies on this module to keep provider-specific logic out of
@@ -8,14 +6,16 @@ run orchestration. Current implementations:
 - OpenAI-compatible chat-completions provider for prototype cloud usage
 """
 
+from __future__ import annotations
+
 import json
 from abc import ABC, abstractmethod
 from typing import Any
 
 import httpx
 
-from infostream.models.schemas import LlmConfig
-from infostream.models.schemas import ItemRecord
+from infostream.models.schemas import ItemRecord, LlmConfig
+
 
 class SummarizerProvider(ABC):
     """Abstract provider contract for summarize/repair operations."""
@@ -169,8 +169,10 @@ class OpenAICompatibleProvider(SummarizerProvider):
         payload = json.dumps(serializable_items, ensure_ascii=True)
         return (
             "You are an assistant that outputs JSON only.\n"
-            "Given canonical items and user interests, return a digest JSON object with keys:\n"
-            "version, new_communications, important_dates_events, interests, links, entities, relations, extraneous.\n"
+            "Given canonical items and user interests, return a digest JSON "
+            "object with keys:\n"
+            "version, new_communications, important_dates_events, interests, "
+            "links, entities, relations, extraneous.\n"
             "All citations must be item_ref values from the provided items.\n"
             f"Interests: {interests_text}\n"
             f"Items: {payload}\n"

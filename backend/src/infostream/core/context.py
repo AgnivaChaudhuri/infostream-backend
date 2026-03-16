@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Application context assembly and lifecycle wiring for backend subsystems."""
+
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -18,6 +18,7 @@ from infostream.models.schemas import LockfileRecord, now_rfc3339
 from infostream.scheduler.service import SchedulerService
 from infostream.sources.executor import SourceExecutor
 from infostream.sources.manager import SourceManager
+
 
 @dataclass
 class AppContext:

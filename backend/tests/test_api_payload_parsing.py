@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Unit tests for explicit route payload/query parsing helpers."""
+
+from __future__ import annotations
 
 import pytest
 

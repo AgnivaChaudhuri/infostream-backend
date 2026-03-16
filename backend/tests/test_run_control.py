@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Unit tests for run cancellation and event publication behavior."""
+
+from __future__ import annotations
 
 from pathlib import Path
 

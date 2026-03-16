@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Unit tests for source install-time compatibility checks."""
+
+from __future__ import annotations
 
 from pathlib import Path
 

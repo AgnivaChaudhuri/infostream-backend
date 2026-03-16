@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """HTTP route handlers for Infostream's backend API surface."""
+
+from __future__ import annotations
 
 import asyncio
 import json
@@ -132,7 +132,10 @@ async def source_install(request: Request, payload: InstallSourceRequest) -> Any
 @router.delete("/sources/{source_uid}")
 async def source_uninstall(request: Request, source_uid: str) -> Any:
     ctx = _ctx(request)
-    in_use = source_uid in ctx.digest_service.active_sources() or ctx.db.run_is_active_for_source(source_uid)
+    in_use = (
+        source_uid in ctx.digest_service.active_sources()
+        or ctx.db.run_is_active_for_source(source_uid)
+    )
     try:
         ctx.source_manager.uninstall(source_uid, in_use=in_use)
         return success("Source uninstalled")
@@ -318,7 +321,7 @@ async def events_stream(request: Request) -> StreamingResponse:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15.0)
                     yield _sse_encode(event)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Keepalive comments prevent idle proxies from closing the stream.
                     yield ": keepalive\n\n"
         finally:

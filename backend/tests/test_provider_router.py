@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Unit tests for provider routing and default LLM configuration behavior."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -10,8 +10,7 @@ from infostream.core.config import BackendConfig
 from infostream.core.files import ensure_system_layout, read_json
 from infostream.core.paths import build_paths
 from infostream.digest.provider import ProviderRouter, SummarizerProvider
-from infostream.models.schemas import ItemRecord
-from infostream.models.schemas import LlmConfig
+from infostream.models.schemas import ItemRecord, LlmConfig
 
 
 class _FakeProvider(SummarizerProvider):
@@ -43,19 +42,28 @@ class _FakeProvider(SummarizerProvider):
 
 
 def test_provider_router_requires_configured_llm() -> None:
-    router = ProviderRouter(stub_provider=_FakeProvider("stub"), openai_provider=_FakeProvider("openai"))
+    router = ProviderRouter(
+        stub_provider=_FakeProvider("stub"),
+        openai_provider=_FakeProvider("openai"),
+    )
     with pytest.raises(RuntimeError):
         router.summarize([], "", LlmConfig())
 
 
 def test_provider_router_uses_stub_provider_for_stub_ids() -> None:
-    router = ProviderRouter(stub_provider=_FakeProvider("stub"), openai_provider=_FakeProvider("openai"))
+    router = ProviderRouter(
+        stub_provider=_FakeProvider("stub"),
+        openai_provider=_FakeProvider("openai"),
+    )
     llm = LlmConfig(name="stub-local", mode="local", unique_id="stub-local", config={})
     assert router.summarize([], "", llm) == "stub"
 
 
 def test_provider_router_uses_openai_provider_for_non_stub_ids() -> None:
-    router = ProviderRouter(stub_provider=_FakeProvider("stub"), openai_provider=_FakeProvider("openai"))
+    router = ProviderRouter(
+        stub_provider=_FakeProvider("stub"),
+        openai_provider=_FakeProvider("openai"),
+    )
     llm = LlmConfig(name="openai", mode="cloud", unique_id="gpt-4o-mini", config={})
     assert router.summarize([], "", llm) == "openai"
 

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Scheduler loop that converts saved schedule settings into digest runs.
 
 This module intentionally keeps scheduling deterministic and explicit through a
@@ -7,6 +5,8 @@ small in-memory state machine:
 - `stabilizing`: startup grace period before first scheduling decision.
 - `ready`: steady-state scheduling tick loop.
 """
+
+from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime

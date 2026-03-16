@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Filesystem helpers for JSON state files and daemon system layout."""
+
+from __future__ import annotations
 
 import json
 import tempfile
@@ -10,10 +10,16 @@ from typing import Any
 from infostream.core.config import BackendConfig
 from infostream.core.paths import BackendPaths
 
+
 def atomic_write_json(path: Path, payload: Any) -> None:
     """Write JSON atomically to avoid partial state on interruption."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
+    with tempfile.NamedTemporaryFile(
+        "w",
+        delete=False,
+        dir=str(path.parent),
+        encoding="utf-8",
+    ) as tmp:
         json.dump(payload, tmp, indent=2, ensure_ascii=True)
         tmp.write("\n")
         tmp_path = Path(tmp.name)

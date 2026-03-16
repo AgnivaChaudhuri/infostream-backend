@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Unit tests for source output and media retention caps."""
+
+from __future__ import annotations
 
 import time
 from pathlib import Path

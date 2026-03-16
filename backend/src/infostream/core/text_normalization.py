@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Text normalization rules used for deterministic hashing.
 
 This module is intentionally isolated so reviewers can change or roll back text
 normalization behavior without touching unrelated hashing logic.
 """
+
+from __future__ import annotations
 
 import re
 

@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """In-memory event broker used by SSE subscribers.
 
 The broker intentionally stays process-local for the prototype. It can be
 replaced later with a durable/pub-sub transport without changing route
 contracts.
 """
+
+from __future__ import annotations
 
 import asyncio
 from typing import Any
