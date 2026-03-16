@@ -2,17 +2,19 @@ from __future__ import annotations
 
 """HTTP route handlers for Infostream's backend API surface."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, Query, Request
 from pydantic import ValidationError
+from starlette.responses import StreamingResponse
 
 from infostream.api.responses import error, success
 from infostream.core.context import AppContext
 from infostream.core.validation import parse_rfc3339
-from infostream.digest.service import DigestBusyError
+from infostream.digest.service import DigestBusyError, RunAlreadyFinishedError, RunNotFoundError
 from infostream.models.schemas import InstallSourceRequest, LlmRequest, ScheduleRequest
 from infostream.sources.manager import SourceError
 
@@ -51,6 +53,13 @@ def _parse_refs_query(refs: str, max_refs: int) -> list[str]:
     if len(refs_list) > max_refs:
         raise ValueError(f"refs exceeds max size of {max_refs}")
     return refs_list
+
+
+def _sse_encode(event: dict[str, Any]) -> str:
+    """Encode event dict in SSE wire format."""
+    event_type = str(event.get("type", "message"))
+    payload = json.dumps(event, ensure_ascii=True)
+    return f"event: {event_type}\ndata: {payload}\n\n"
 
 
 @router.get("/health")
@@ -270,6 +279,19 @@ async def runs_get(request: Request, run_id: str) -> Any:
     return success("Run loaded", {"run": run.model_dump(), "sources": results})
 
 
+@router.post("/runs/{run_id}/cancel")
+async def runs_cancel(request: Request, run_id: str) -> Any:
+    """Request cancellation of a queued/running run."""
+    ctx = _ctx(request)
+    try:
+        await ctx.digest_service.cancel_run(run_id)
+        return success("Run cancel requested", {"run_id": run_id})
+    except RunNotFoundError:
+        return error("Run not found", "RUN_NOT_FOUND", 404)
+    except RunAlreadyFinishedError:
+        return error("Run already finished", "RUN_ALREADY_FINISHED", 409)
+
+
 @router.get("/items")
 async def items_lookup(request: Request, refs: str = Query(default="")) -> Any:
     """Resolve item_ref citations into source/title/url metadata."""
@@ -280,3 +302,26 @@ async def items_lookup(request: Request, refs: str = Query(default="")) -> Any:
         return error(str(exc), "INVALID_REFS", 422)
     items = ctx.db.get_items_by_refs(refs_list)
     return success("Items loaded", {"items": items})
+
+
+@router.get("/events/stream")
+async def events_stream(request: Request) -> StreamingResponse:
+    """Server-Sent Events stream for run lifecycle notifications."""
+    ctx = _ctx(request)
+    queue = await ctx.event_broker.subscribe()
+
+    async def generator() -> Any:
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield _sse_encode(event)
+                except asyncio.TimeoutError:
+                    # Keepalive comments prevent idle proxies from closing the stream.
+                    yield ": keepalive\n\n"
+        finally:
+            await ctx.event_broker.unsubscribe(queue)
+
+    return StreamingResponse(generator(), media_type="text/event-stream")

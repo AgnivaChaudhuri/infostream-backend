@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from infostream.core.config import BackendConfig
+from infostream.core.events import EventBroker
 from infostream.core.hashing import canonicalize_url, compute_item_ref, content_hash
 from infostream.core.state import StateStore
 from infostream.core.validation import parse_rfc3339
@@ -33,6 +34,26 @@ from infostream.sources.manager import SourceManager
 
 
 class DigestBusyError(Exception):
+    """Raised when attempting to start a second concurrent run."""
+
+    pass
+
+
+class RunNotFoundError(Exception):
+    """Raised when requesting control for an unknown run ID."""
+
+    pass
+
+
+class RunAlreadyFinishedError(Exception):
+    """Raised when requesting control for an already terminal run."""
+
+    pass
+
+
+class RunCanceledError(Exception):
+    """Internal control-flow exception used to stop an in-flight run."""
+
     pass
 
 
@@ -48,6 +69,7 @@ class DigestRunService:
         source_executor: SourceExecutor,
         summarizer: SummarizerProvider,
         config: BackendConfig,
+        event_broker: EventBroker,
     ) -> None:
         self._db = db
         self._state_store = state_store
@@ -55,11 +77,13 @@ class DigestRunService:
         self._source_executor = source_executor
         self._summarizer = summarizer
         self._config = config
+        self._event_broker = event_broker
 
         self._guard = asyncio.Lock()
         self._active_run_id: str | None = None
         self._active_task: asyncio.Task[None] | None = None
         self._active_sources: set[str] = set()
+        self._cancel_requested: set[str] = set()
 
     def is_running(self) -> bool:
         return self._active_task is not None and not self._active_task.done()
@@ -93,12 +117,47 @@ class DigestRunService:
             self._active_run_id = None
             self._active_task = None
             self._active_sources.clear()
+            self._cancel_requested.discard(run_id)
+
+    async def cancel_run(self, run_id: str) -> None:
+        """Request cancellation for queued/running runs.
+
+        Running runs use cooperative cancellation checkpoints between source
+        executions and before digest build.
+        """
+        async with self._guard:
+            run = self._db.get_run(run_id)
+            if run is None:
+                raise RunNotFoundError(f"run {run_id} not found")
+            if run.status in {"succeeded", "failed", "canceled"}:
+                raise RunAlreadyFinishedError(f"run {run_id} already finished")
+
+            self._cancel_requested.add(run_id)
+            if run.status == "queued":
+                self._db.update_run(
+                    run_id,
+                    status="canceled",
+                    finished_at=now_rfc3339(),
+                    digest_id=None,
+                    error_code=None,
+                    error_message="Run canceled before execution started",
+                    raw_llm_output=None,
+                )
+
+        await self._publish_event(
+            event_type="run_canceled",
+            run_id=run_id,
+            status="canceled",
+            details={"reason": "user_cancel"},
+        )
 
     # Run digest engine start to finish
     # Mark running, execute all sources, store Items+cursors+results, build
     # digest, persist digest, finalize run status, recompute schedule
     async def _execute_run(self, run_id: str, trigger: str) -> None:
         try:
+            if self._is_cancel_requested(run_id):
+                raise RunCanceledError("run canceled before start")
             self._db.update_run(
                 run_id,
                 status="running",
@@ -108,12 +167,20 @@ class DigestRunService:
                 error_message=None,
                 raw_llm_output=None,
             )
+            await self._publish_event(
+                event_type="run_started",
+                run_id=run_id,
+                status="running",
+                details={"trigger": trigger},
+            )
 
             settings = self._state_store.read_settings()
             enabled_sources = self._source_manager.list_enabled()
 
             # Execute each source
             for source in enabled_sources:
+                if self._is_cancel_requested(run_id):
+                    raise RunCanceledError("run canceled while sources were executing")
                 self._active_sources.add(source.uid)
                 cursor = self._db.get_source_cursor(source.uid)
                 try:
@@ -147,7 +214,11 @@ class DigestRunService:
                     self._active_sources.discard(source.uid)
 
                 self._db.add_run_source_result(run_id, source_result)
+                if self._is_cancel_requested(run_id):
+                    raise RunCanceledError("run canceled after source execution")
 
+            if self._is_cancel_requested(run_id):
+                raise RunCanceledError("run canceled before digest build")
             # Group and store digest
             run_items = self._db.get_items_for_run(run_id)
             digest_payload, raw_output, digest_error = self._build_digest(run_items, settings)
@@ -172,8 +243,33 @@ class DigestRunService:
                 error_message=digest_error[1] if digest_error else None,
                 raw_llm_output=raw_output if digest_error else None,
             )
+            await self._publish_event(
+                event_type="run_finished",
+                run_id=run_id,
+                status="succeeded",
+                details={
+                    "digest_id": digest_id,
+                    "error_code": digest_error[0] if digest_error else None,
+                },
+            )
 
             self._recompute_schedule(settings, trigger, finished_at)
+        except RunCanceledError as exc:
+            self._db.update_run(
+                run_id,
+                status="canceled",
+                finished_at=now_rfc3339(),
+                digest_id=None,
+                error_code=None,
+                error_message=str(exc),
+                raw_llm_output=None,
+            )
+            await self._publish_event(
+                event_type="run_canceled",
+                run_id=run_id,
+                status="canceled",
+                details={"reason": str(exc)},
+            )
         except Exception as exc: # If run fails
             self._db.update_run(
                 run_id,
@@ -183,6 +279,12 @@ class DigestRunService:
                 error_code="RUN_FAILED",
                 error_message=str(exc),
                 raw_llm_output=None,
+            )
+            await self._publish_event(
+                event_type="run_failed",
+                run_id=run_id,
+                status="failed",
+                details={"error": str(exc)},
             )
 
     def _build_digest(
@@ -334,3 +436,25 @@ class DigestRunService:
         if trigger == "scheduled" and not settings.run_every:
             settings.schedule = self._config.one_shot_schedule_sentinel
             self._state_store.write_settings(settings)
+
+    def _is_cancel_requested(self, run_id: str) -> bool:
+        """Check whether a run has an active cancellation request."""
+        return run_id in self._cancel_requested
+
+    async def _publish_event(
+        self,
+        *,
+        event_type: str,
+        run_id: str,
+        status: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Publish lifecycle notifications for SSE subscribers."""
+        event = {
+            "type": event_type,
+            "run_id": run_id,
+            "status": status,
+            "details": details or {},
+            "occurred_at": now_rfc3339(),
+        }
+        await self._event_broker.publish(event)

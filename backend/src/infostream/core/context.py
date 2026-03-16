@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 
 from infostream.core.config import BackendConfig
+from infostream.core.events import EventBroker
 from infostream.core.files import ensure_system_layout
 from infostream.core.lockfile import remove_lockfile, write_lockfile
 from infostream.core.paths import BackendPaths, build_paths
@@ -30,6 +31,7 @@ class AppContext:
     source_executor: SourceExecutor
     digest_service: DigestRunService
     scheduler: SchedulerService
+    event_broker: EventBroker
     port: int
 
     async def startup(self) -> None:
@@ -60,6 +62,7 @@ def create_context(config: BackendConfig, port: int) -> AppContext:
     state_store = StateStore(paths)
     source_manager = SourceManager(paths, config)
     source_executor = SourceExecutor(config=config, media_root=paths.media_dir)
+    event_broker = EventBroker()
 
     digest_service = DigestRunService(
         db=db,
@@ -68,6 +71,7 @@ def create_context(config: BackendConfig, port: int) -> AppContext:
         source_executor=source_executor,
         summarizer=ProviderRouter(),
         config=config,
+        event_broker=event_broker,
     )
     scheduler = SchedulerService(
         config=config,
@@ -84,5 +88,6 @@ def create_context(config: BackendConfig, port: int) -> AppContext:
         source_executor=source_executor,
         digest_service=digest_service,
         scheduler=scheduler,
+        event_broker=event_broker,
         port=port,
     )
