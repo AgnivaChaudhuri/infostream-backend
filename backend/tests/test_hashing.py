@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from infostream.core.hashing import canonicalize_url, compute_item_ref, content_hash
+from infostream.core.text_normalization import normalize_text_for_hashing
 
 
 def test_canonicalize_url_normalizes_host_port_and_fragment() -> None:
@@ -10,6 +11,14 @@ def test_canonicalize_url_normalizes_host_port_and_fragment() -> None:
 
 def test_content_hash_normalizes_newlines() -> None:
     assert content_hash("a\r\nb") == content_hash("a\nb")
+
+
+def test_content_hash_normalizes_trailing_whitespace_and_outer_padding() -> None:
+    assert content_hash("  a  \n b  \n") == content_hash("a\n b")
+
+
+def test_normalize_text_for_hashing_collapses_excess_blank_lines() -> None:
+    assert normalize_text_for_hashing("a\n\n\n\nb") == "a\n\nb"
 
 
 def test_item_ref_precedence() -> None:
