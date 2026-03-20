@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from infostream.core.config import BackendConfig
 from infostream.core.files import atomic_write_json, read_json
+from infostream.core.logging import get_logger
 from infostream.core.paths import BackendPaths
 from infostream.core.validation import is_semver
 from infostream.models.schemas import InstalledSourcesRecord, SourceInfo, SourceRecord
@@ -37,15 +38,27 @@ class SourceManager:
     def __init__(self, paths: BackendPaths, config: BackendConfig) -> None:
         self._paths = paths
         self._config = config
+        self._logger = get_logger("sources.manager")
 
     def _load(self) -> InstalledSourcesRecord:
         """Load installed source registry from disk."""
         data = read_json(self._paths.installed_sources)
-        return InstalledSourcesRecord.model_validate(data)
+        record = InstalledSourcesRecord.model_validate(data)
+        self._logger.debug(
+            "source_registry_loaded",
+            message="loaded installed source registry",
+            count=len(record.sources),
+        )
+        return record
 
     def _save(self, record: InstalledSourcesRecord) -> None:
         """Persist installed source registry atomically."""
         atomic_write_json(self._paths.installed_sources, record.model_dump())
+        self._logger.debug(
+            "source_registry_saved",
+            message="saved installed source registry",
+            count=len(record.sources),
+        )
 
     def list_installed(self) -> list[SourceRecord]:
         """Return all installed sources."""
@@ -65,6 +78,9 @@ class SourceManager:
 
     def enable(self, source_uid: str) -> SourceRecord:
         """Enable a source if it exists and supports the current platform."""
+        self._logger.info(
+            "source_enable_requested", message="enable source requested", source_uid=source_uid
+        )
         record = self._load()
         source = next((item for item in record.sources if item.uid == source_uid), None)
         if source is None:
@@ -83,10 +99,14 @@ class SourceManager:
 
         source.enabled = True
         self._save(record)
+        self._logger.info("source_enabled", message="source enabled", source_uid=source_uid)
         return source
 
     def disable(self, source_uid: str) -> SourceRecord:
         """Disable an enabled source."""
+        self._logger.info(
+            "source_disable_requested", message="disable source requested", source_uid=source_uid
+        )
         record = self._load()
         source = next((item for item in record.sources if item.uid == source_uid), None)
         if source is None:
@@ -97,10 +117,16 @@ class SourceManager:
 
         source.enabled = False
         self._save(record)
+        self._logger.info("source_disabled", message="source disabled", source_uid=source_uid)
         return source
 
     def install(self, source_path: Path) -> SourceRecord:
         """Validate and install a source package into the internal source root."""
+        self._logger.info(
+            "source_install_requested",
+            message="source install requested",
+            source_path=str(source_path),
+        )
         if not source_path.exists() or not source_path.is_dir():
             raise SourceError("Source directory is invalid", "INVALID_SOURCE_PACKAGE", 400)
 
@@ -149,7 +175,7 @@ class SourceManager:
         install_dir = self._paths.sources_dir / source_uid
         try:
             shutil.copytree(source_path, install_dir)
-        except OSError as exc: # If something fails due to system constraints
+        except OSError as exc:  # If something fails due to system constraints
             raise SourceError(f"Source install failed: {exc}", "INSTALL_FAILED", 500) from exc
 
         source = SourceRecord(
@@ -165,10 +191,23 @@ class SourceManager:
         )
         record.sources.append(source)
         self._save(record)
+        self._logger.info(
+            "source_install_completed",
+            message="source install completed",
+            source_uid=source_uid,
+            source_name=source.name,
+            source_version=source.version,
+        )
         return source
 
     def uninstall(self, source_uid: str, *, in_use: bool = False) -> None:
         """Remove a source package from disk and source registry."""
+        self._logger.info(
+            "source_uninstall_requested",
+            message="source uninstall requested",
+            source_uid=source_uid,
+            in_use=in_use,
+        )
         if in_use:
             raise SourceError("Source is currently in use", "SOURCE_IN_USE", 409)
 
@@ -192,6 +231,7 @@ class SourceManager:
 
         del record.sources[index]
         self._save(record)
+        self._logger.info("source_uninstalled", message="source uninstalled", source_uid=source_uid)
 
     def _parse_source_info(self, info_data: dict[str, object]) -> SourceInfo:
         """Parse source metadata in canonical or snake_case aliases."""

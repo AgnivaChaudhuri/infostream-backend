@@ -1,1 +1,1 @@
-{"main-capability":{"identifier":"main-capability","description":"Default desktop capability","local":true,"windows":["main"],"permissions":["core:default","allow-bootstrap-backend"]}}
+{"main-capability":{"identifier":"main-capability","description":"Default desktop capability","local":true,"windows":["main"],"permissions":["core:default","allow-bootstrap-backend","allow-pick-source-directory","allow-emit-frontend-log"]}}

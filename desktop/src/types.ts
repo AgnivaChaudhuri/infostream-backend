@@ -1,8 +1,17 @@
+// Shared frontend type contracts matching backend API envelope and payload shapes.
+
 export type ApiEnvelope<T> = {
   ok: boolean;
   message: string;
   error_code: string | null;
   data?: T;
+};
+
+export type LlmConfigPayload = {
+  name: string;
+  mode: "local" | "cloud";
+  unique_id: string;
+  config: Record<string, unknown>;
 };
 
 export type SourceRecord = {
@@ -27,4 +36,12 @@ export type RunRecord = {
   error_code: string | null;
   error_message: string | null;
   raw_llm_output: string | null;
+};
+
+export type RunEvent = {
+  type: string;
+  run_id: string;
+  status: string;
+  details: Record<string, unknown>;
+  occurred_at: string;
 };

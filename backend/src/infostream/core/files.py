@@ -35,6 +35,7 @@ def read_json(path: Path) -> Any:
 def ensure_system_layout(paths: BackendPaths, config: BackendConfig) -> None:
     """Create daemon root layout and initialize default state files."""
     paths.root.mkdir(parents=True, exist_ok=True)
+    paths.logs_dir.mkdir(parents=True, exist_ok=True)
     paths.media_dir.mkdir(parents=True, exist_ok=True)
     paths.sources_dir.mkdir(parents=True, exist_ok=True)
 

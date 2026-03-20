@@ -7,10 +7,12 @@ from pathlib import Path
 import uvicorn
 
 from infostream.core.config import BackendConfig
+from infostream.core.logging import get_logger
 from infostream.main import create_app
 
 # This file is the CLI entry point and implements the ports/CLI entry
 # and argument parsing functions
+
 
 def _find_free_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -34,6 +36,15 @@ def main() -> None:
 
     config = BackendConfig(home=args.home)
     app = create_app(config=config, port=port)
+    logger = get_logger("cli")
+    logger.info(
+        "daemon_starting",
+        message="starting backend daemon",
+        host=args.host,
+        port=port,
+        home=str(args.home) if args.home else None,
+        log_level=config.log_level,
+    )
 
     uvicorn.run(app, host=args.host, port=port, log_level="info")
 

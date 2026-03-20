@@ -13,10 +13,12 @@ from infostream.core.config import BackendConfig
 # overloaded with pathlib so it resolves to path names
 # instead of division.
 
+
 @dataclass(frozen=True)
 class BackendPaths:
     root: Path
     lockfile: Path
+    logs_dir: Path
     settings: Path
     installed_sources: Path
     db: Path
@@ -50,6 +52,7 @@ def build_paths(config: BackendConfig) -> BackendPaths:
     return BackendPaths(
         root=root,
         lockfile=root / config.lockfile_name,
+        logs_dir=root / config.logs_dirname,
         settings=root / config.settings_filename,
         installed_sources=root / config.installed_sources_filename,
         db=root / config.db_filename,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from infostream.core.validation import is_semver
 

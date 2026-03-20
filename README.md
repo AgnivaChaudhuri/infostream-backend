@@ -75,6 +75,20 @@ make desktop-build
 
 - `desktop/src-tauri/bin/infostream-backend`
 
+## Logging
+
+Logging is enabled by default at `DEBUG` level with redaction for sensitive keys
+(`api_key`, `authorization`, `token`, `password`, `secret`, etc.).
+
+Log outputs are written under the app system root (`~/.config/infostream` on Linux):
+
+- Backend human-readable: `logs/backend.log`
+- Backend JSON lines: `logs/backend.jsonl`
+- Frontend/Tauri human-readable: `logs/frontend.log`
+- Frontend/Tauri JSON lines: `logs/frontend.jsonl`
+
+File rotation is enabled for all log files: `20MB` max file size, `5` backups.
+
 ## API Endpoints
 
 Implemented endpoints:

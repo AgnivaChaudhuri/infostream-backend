@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from infostream.core.config import BackendConfig
 from infostream.core.hashing import sha256_hex
+from infostream.core.logging import get_logger
 from infostream.models.schemas import IncomingItem, SourceOutput, SourceRecord
 
 
@@ -48,9 +49,16 @@ class SourceExecutor:
     def __init__(self, config: BackendConfig, media_root: Path) -> None:
         self._config = config
         self._media_root = media_root
+        self._logger = get_logger("sources.executor")
 
     async def execute(self, source: SourceRecord, cursor: str | None) -> SourceExecutionResult:
         """Run one source executable and return parsed/ingested result."""
+        self._logger.info(
+            "source_execution_started",
+            message="source execution started",
+            source_uid=source.uid,
+            cursor_present=cursor is not None,
+        )
         source_dir = Path(source.exec_path)
         exec_path = source_dir / "src_exec"
         if not exec_path.exists():
@@ -67,6 +75,12 @@ class SourceExecutor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._logger.debug(
+            "source_process_spawned",
+            message="source process spawned",
+            source_uid=source.uid,
+            pid=proc.pid,
+        )
 
         stdout_bytes: bytes = b""
         stderr_bytes: bytes = b""
@@ -79,6 +93,12 @@ class SourceExecutor:
             )
         except TimeoutError:
             timed_out = True
+            self._logger.warning(
+                "source_process_timeout_graceful",
+                message="source process exceeded graceful timeout",
+                source_uid=source.uid,
+                timeout_seconds=self._config.graceful_source_timeout_seconds,
+            )
             proc.terminate()
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -87,6 +107,12 @@ class SourceExecutor:
                     - self._config.graceful_source_timeout_seconds,
                 )
             except TimeoutError:
+                self._logger.error(
+                    "source_process_timeout_hard",
+                    message="source process exceeded hard timeout and will be killed",
+                    source_uid=source.uid,
+                    timeout_seconds=self._config.hard_source_timeout_seconds,
+                )
                 self._kill_process_tree(proc.pid)
                 stdout_bytes, stderr_bytes = await proc.communicate()
 
@@ -105,6 +131,15 @@ class SourceExecutor:
         output = self._load_source_output(source_dir)
         self._ingest_media(source_dir, output)
 
+        self._logger.info(
+            "source_execution_completed",
+            message="source execution completed",
+            source_uid=source.uid,
+            duration_ms=duration_ms,
+            item_count=len(output.items),
+            next_cursor_present=output.next_cursor is not None,
+        )
+
         return SourceExecutionResult(
             source_uid=source.uid,
             status="succeeded",
@@ -121,6 +156,12 @@ class SourceExecutor:
             raise SourceExecutionError("src_output.json missing", "src_output missing", 0)
         if output_json.stat().st_size > self._config.source_json_max_bytes:
             raise SourceExecutionError("src_output.json exceeds size cap", "json exceeds cap", 0)
+        self._logger.debug(
+            "source_output_json_size_valid",
+            message="validated source output json size",
+            source_dir=str(source_dir),
+            json_size_bytes=output_json.stat().st_size,
+        )
 
         media_dir = source_dir / "src_media"
         if media_dir.exists() and media_dir.is_dir():
@@ -130,12 +171,25 @@ class SourceExecutor:
                     total += path.stat().st_size
             if total > self._config.source_media_max_bytes:
                 raise SourceExecutionError("src_media exceeds size cap", "media exceeds cap", 0)
+            self._logger.debug(
+                "source_media_size_valid",
+                message="validated source media size",
+                source_dir=str(source_dir),
+                media_size_bytes=total,
+            )
 
     def _load_source_output(self, source_dir: Path) -> SourceOutput:
         """Load and schema-validate src_output.json."""
         try:
             raw = (source_dir / "src_output.json").read_text(encoding="utf-8")
-            return SourceOutput.model_validate_json(raw)
+            output = SourceOutput.model_validate_json(raw)
+            self._logger.debug(
+                "source_output_parsed",
+                message="parsed source output file",
+                source_dir=str(source_dir),
+                item_count=len(output.items),
+            )
+            return output
         except OSError as exc:
             raise SourceExecutionError(f"cannot read src_output.json: {exc}", str(exc), 0) from exc
         except ValidationError as exc:
@@ -158,6 +212,12 @@ class SourceExecutor:
                     out_path.write_bytes(content)
                 media_lookup[media_path.name] = media_hash
             self._enforce_media_cache_limit()
+            self._logger.debug(
+                "source_media_ingested",
+                message="ingested source media files",
+                source_dir=str(source_dir),
+                media_file_count=len(media_lookup),
+            )
 
         for item in output.items:
             refs: list[str] = list(item.media_refs)
@@ -174,6 +234,9 @@ class SourceExecutor:
         try:
             if os.name == "posix":
                 os.kill(pid, signal.SIGKILL)
+                self._logger.warning(
+                    "source_process_killed", message="source process killed", pid=pid
+                )
         except OSError:
             return
 
@@ -189,6 +252,7 @@ class SourceExecutor:
 
         # Oldest files are evicted first to preserve more recently ingested media.
         files.sort(key=lambda path: path.stat().st_mtime)
+        evicted_count = 0
         for path in files:
             size = path.stat().st_size
             try:
@@ -196,5 +260,13 @@ class SourceExecutor:
             except OSError:
                 continue
             total_bytes -= size
+            evicted_count += 1
             if total_bytes <= self._config.media_cache_max_bytes:
                 break
+        self._logger.warning(
+            "media_cache_eviction",
+            message="media cache retention evicted old files",
+            evicted_count=evicted_count,
+            remaining_bytes=total_bytes,
+            max_bytes=self._config.media_cache_max_bytes,
+        )

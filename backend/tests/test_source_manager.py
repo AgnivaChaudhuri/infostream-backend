@@ -20,12 +20,12 @@ def _make_source_package(tmp_path: Path, interface_version: str) -> Path:
     (source_dir / "src_info.json").write_text(
         (
             "{"
-            f"\"name\":\"Demo Source\","
-            f"\"description\":\"Demo\","
-            f"\"version\":\"1.0.0\","
-            f"\"interface_version\":\"{interface_version}\","
-            "\"developer\":\"tester\","
-            "\"platforms\":[\"linux\"]"
+            f'"name":"Demo Source",'
+            f'"description":"Demo",'
+            f'"version":"1.0.0",'
+            f'"interface_version":"{interface_version}",'
+            '"developer":"tester",'
+            '"platforms":["linux"]'
             "}"
         ),
         encoding="utf-8",

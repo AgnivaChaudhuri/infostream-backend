@@ -2,3 +2,13 @@
 identifier = "allow-bootstrap-backend"
 description = "Allow invoking bootstrap backend command"
 commands.allow = ["bootstrap_backend"]
+
+[[permission]]
+identifier = "allow-pick-source-directory"
+description = "Allow invoking native source directory picker command"
+commands.allow = ["pick_source_directory"]
+
+[[permission]]
+identifier = "allow-emit-frontend-log"
+description = "Allow forwarding frontend log payloads to Rust logging sinks"
+commands.allow = ["emit_frontend_log"]

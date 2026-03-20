@@ -15,6 +15,7 @@ from typing import Any
 from infostream.core.config import BackendConfig
 from infostream.core.events import EventBroker
 from infostream.core.hashing import canonicalize_url, compute_item_ref, content_hash
+from infostream.core.logging import get_logger, sanitize_for_log
 from infostream.core.state import StateStore
 from infostream.core.validation import parse_rfc3339
 from infostream.db.database import Database
@@ -78,6 +79,7 @@ class DigestRunService:
         self._summarizer = summarizer
         self._config = config
         self._event_broker = event_broker
+        self._logger = get_logger("digest.service")
 
         self._guard = asyncio.Lock()
         self._active_run_id: str | None = None
@@ -95,16 +97,26 @@ class DigestRunService:
     async def launch_run(self, trigger: str) -> str:
         async with self._guard:
             if self.is_running():
+                self._logger.warning(
+                    "digest_launch_rejected_busy",
+                    message="digest launch rejected because another run is active",
+                )
                 raise DigestBusyError("digest already running")
 
             run_id = str(uuid.uuid4())
-            run = RunRecord( # Add to QUEUE for scheduling
+            run = RunRecord(  # Add to QUEUE for scheduling
                 run_id=run_id,
                 trigger="scheduled" if trigger == "scheduled" else "manual",
                 status="queued",
                 started_at=now_rfc3339(),
             )
             self._db.create_run(run)
+            self._logger.info(
+                "digest_run_queued",
+                message="digest run queued",
+                run_id=run_id,
+                trigger=run.trigger,
+            )
             task = asyncio.create_task(self._execute_run(run_id, run.trigger))
             self._active_run_id = run_id
             self._active_task = task
@@ -118,6 +130,9 @@ class DigestRunService:
             self._active_task = None
             self._active_sources.clear()
             self._cancel_requested.discard(run_id)
+            self._logger.debug(
+                "digest_run_state_cleared", message="cleared active run state", run_id=run_id
+            )
 
     async def cancel_run(self, run_id: str) -> None:
         """Request cancellation for queued/running runs.
@@ -128,8 +143,19 @@ class DigestRunService:
         async with self._guard:
             run = self._db.get_run(run_id)
             if run is None:
+                self._logger.warning(
+                    "digest_cancel_rejected_not_found",
+                    message="cancel requested for unknown run",
+                    run_id=run_id,
+                )
                 raise RunNotFoundError(f"run {run_id} not found")
             if run.status in {"succeeded", "failed", "canceled"}:
+                self._logger.warning(
+                    "digest_cancel_rejected_terminal",
+                    message="cancel requested for terminal run",
+                    run_id=run_id,
+                    status=run.status,
+                )
                 raise RunAlreadyFinishedError(f"run {run_id} already finished")
 
             self._cancel_requested.add(run_id)
@@ -142,6 +168,11 @@ class DigestRunService:
                     error_code=None,
                     error_message="Run canceled before execution started",
                     raw_llm_output=None,
+                )
+                self._logger.info(
+                    "digest_run_canceled_pre_execution",
+                    message="queued run canceled before execution",
+                    run_id=run_id,
                 )
 
         await self._publish_event(
@@ -158,6 +189,12 @@ class DigestRunService:
         try:
             if self._is_cancel_requested(run_id):
                 raise RunCanceledError("run canceled before start")
+            self._logger.info(
+                "digest_run_started",
+                message="digest run execution started",
+                run_id=run_id,
+                trigger=trigger,
+            )
             self._db.update_run(
                 run_id,
                 status="running",
@@ -176,6 +213,12 @@ class DigestRunService:
 
             settings = self._state_store.read_settings()
             enabled_sources = self._source_manager.list_enabled()
+            self._logger.debug(
+                "digest_sources_loaded",
+                message="loaded enabled sources for digest run",
+                run_id=run_id,
+                source_count=len(enabled_sources),
+            )
 
             # Execute each source
             for source in enabled_sources:
@@ -183,10 +226,17 @@ class DigestRunService:
                     raise RunCanceledError("run canceled while sources were executing")
                 self._active_sources.add(source.uid)
                 cursor = self._db.get_source_cursor(source.uid)
+                self._logger.info(
+                    "digest_source_started",
+                    message="starting source execution for digest run",
+                    run_id=run_id,
+                    source_uid=source.uid,
+                    cursor_present=cursor is not None,
+                )
                 try:
                     result = await self._source_executor.execute(source, cursor)
                     ingested_count = 0
-                    for incoming in result.items: # Canonicalize into Item
+                    for incoming in result.items:  # Canonicalize into Item
                         canonical = self._to_canonical_item(incoming, source.uid)
                         _inserted, item = self._db.upsert_item(canonical, seen_at=now_rfc3339())
                         self._db.add_run_item(run_id, item.item_ref)
@@ -201,6 +251,14 @@ class DigestRunService:
                         items_ingested_count=ingested_count,
                         stderr_tail=result.stderr_tail,
                     )
+                    self._logger.info(
+                        "digest_source_succeeded",
+                        message="source execution succeeded",
+                        run_id=run_id,
+                        source_uid=source.uid,
+                        duration_ms=result.duration_ms,
+                        items_ingested=ingested_count,
+                    )
                 # If it errors
                 except SourceExecutionError as exc:
                     source_result = RunSourceResult(
@@ -209,6 +267,14 @@ class DigestRunService:
                         duration_ms=exc.duration_ms,
                         items_ingested_count=0,
                         stderr_tail=exc.stderr_tail,
+                    )
+                    self._logger.warning(
+                        "digest_source_failed",
+                        message="source execution failed",
+                        run_id=run_id,
+                        source_uid=source.uid,
+                        duration_ms=exc.duration_ms,
+                        error_message=exc.message,
                     )
                 finally:
                     self._active_sources.discard(source.uid)
@@ -221,6 +287,12 @@ class DigestRunService:
                 raise RunCanceledError("run canceled before digest build")
             # Group and store digest
             run_items = self._db.get_items_for_run(run_id)
+            self._logger.debug(
+                "digest_build_started",
+                message="building digest payload from run items",
+                run_id=run_id,
+                item_count=len(run_items),
+            )
             digest_payload, raw_output, digest_error = self._build_digest(run_items, settings)
             digest_id = str(uuid.uuid4())
             digest = DigestRecord(
@@ -231,6 +303,13 @@ class DigestRunService:
                 output_json=digest_payload,
             )
             self._db.create_digest(digest)
+            self._logger.info(
+                "digest_persisted",
+                message="digest persisted",
+                run_id=run_id,
+                digest_id=digest_id,
+                digest_version=digest.version,
+            )
 
             # Finalize run status and update the DB
             finished_at = now_rfc3339()
@@ -254,6 +333,13 @@ class DigestRunService:
             )
 
             self._recompute_schedule(settings, trigger, finished_at)
+            self._logger.info(
+                "digest_run_succeeded",
+                message="digest run completed successfully",
+                run_id=run_id,
+                digest_id=digest_id,
+                fallback_used=digest_error is not None,
+            )
         except RunCanceledError as exc:
             self._db.update_run(
                 run_id,
@@ -270,7 +356,13 @@ class DigestRunService:
                 status="canceled",
                 details={"reason": str(exc)},
             )
-        except Exception as exc: # If run fails
+            self._logger.warning(
+                "digest_run_canceled",
+                message="digest run canceled",
+                run_id=run_id,
+                reason=str(exc),
+            )
+        except Exception as exc:  # If run fails
             self._db.update_run(
                 run_id,
                 status="failed",
@@ -285,6 +377,12 @@ class DigestRunService:
                 run_id=run_id,
                 status="failed",
                 details={"error": str(exc)},
+            )
+            self._logger.exception(
+                "digest_run_failed",
+                message="digest run failed with unhandled error",
+                run_id=run_id,
+                error_code="RUN_FAILED",
             )
 
     def _build_digest(
@@ -302,12 +400,26 @@ class DigestRunService:
         The run is allowed to succeed when fallback validates. Only fallback
         generation/validation failure escalates into a failed run.
         """
+        self._logger.debug(
+            "digest_summarizer_primary_start",
+            message="invoking summarizer for primary digest output",
+            item_count=len(items),
+            llm_unique_id=settings.llm.unique_id,
+        )
         raw_output = self._summarizer.summarize(items, settings.interests, settings.llm)
         payload, errors = self._parse_and_validate(raw_output, items)
         if not errors and payload is not None:
+            self._logger.debug(
+                "digest_primary_validated", message="primary digest output validated"
+            )
             return payload, raw_output, None
 
         # One repair attempt after schema/citation failure.
+        self._logger.warning(
+            "digest_primary_invalid_repairing",
+            message="primary digest output invalid, attempting repair",
+            validation_errors=sanitize_for_log(errors),
+        )
         repair_raw = self._summarizer.repair(
             raw_output,
             errors,
@@ -317,6 +429,7 @@ class DigestRunService:
         )
         repaired_payload, repaired_errors = self._parse_and_validate(repair_raw, items)
         if not repaired_errors and repaired_payload is not None:
+            self._logger.info("digest_repair_validated", message="digest repair output validated")
             return repaired_payload, repair_raw, None
 
         # Final fallback path; this must also validate before we accept it.
@@ -328,9 +441,19 @@ class DigestRunService:
         )
         fallback_errors = fallback_schema_errors + fallback_citation_errors
         if fallback_errors:
+            self._logger.error(
+                "digest_fallback_invalid",
+                message="fallback digest validation failed",
+                validation_errors=sanitize_for_log(fallback_errors),
+            )
             raise RuntimeError(f"fallback digest validation failed: {'; '.join(fallback_errors)}")
 
         joined_errors = "; ".join(repaired_errors if repaired_errors else errors)
+        self._logger.warning(
+            "digest_fallback_used",
+            message="digest fallback used after model output failures",
+            validation_errors=sanitize_for_log(joined_errors),
+        )
         return fallback, raw_output, ("LLM_FALLBACK_USED", joined_errors)
 
     def _parse_and_validate(
@@ -342,15 +465,30 @@ class DigestRunService:
         try:
             payload = json.loads(raw_output)
         except json.JSONDecodeError as exc:
+            self._logger.warning(
+                "digest_parse_failed",
+                message="digest output json parse failed",
+                detail=str(exc),
+            )
             return None, [f"invalid JSON: {exc}"]
 
         schema_errors = validate_digest_schema(payload)
         if schema_errors:
+            self._logger.warning(
+                "digest_schema_invalid",
+                message="digest schema validation failed",
+                errors=sanitize_for_log(schema_errors),
+            )
             return payload, schema_errors
 
         valid_refs = {item.item_ref for item in items}
         citation_errors = validate_citations(payload, valid_refs)
         if citation_errors:
+            self._logger.warning(
+                "digest_citations_invalid",
+                message="digest citation validation failed",
+                errors=sanitize_for_log(citation_errors),
+            )
             return payload, citation_errors
 
         return payload, []
@@ -362,7 +500,7 @@ class DigestRunService:
         interest_payload: dict[str, list[dict[str, Any]]] = {}
         for name in interest_names:
             bullets: list[dict[str, Any]] = []
-            if items: # If items exist in LLM output
+            if items:  # If items exist in LLM output
                 for item in items[:3]:
                     text = item.title or item.content_text or item.url or item.item_ref
                     bullets.append(
@@ -372,7 +510,7 @@ class DigestRunService:
                             "confidence": "low",
                         }
                     )
-            else: # If empty
+            else:  # If empty
                 bullets.append(
                     {
                         "text": "No items were ingested for this run.",
@@ -431,11 +569,20 @@ class DigestRunService:
             next_run = (finished + timedelta(seconds=settings.spacing)).astimezone(UTC)
             settings.schedule = next_run.replace(microsecond=0).isoformat().replace("+00:00", "Z")
             self._state_store.write_settings(settings)
+            self._logger.debug(
+                "digest_schedule_recomputed_recurring",
+                message="recomputed recurring schedule after run",
+                next_schedule=settings.schedule,
+            )
             return
 
         if trigger == "scheduled" and not settings.run_every:
             settings.schedule = self._config.one_shot_schedule_sentinel
             self._state_store.write_settings(settings)
+            self._logger.debug(
+                "digest_schedule_recomputed_one_shot",
+                message="reset one-shot schedule to sentinel",
+            )
 
     def _is_cancel_requested(self, run_id: str) -> bool:
         """Check whether a run has an active cancellation request."""
@@ -457,4 +604,11 @@ class DigestRunService:
             "details": details or {},
             "occurred_at": now_rfc3339(),
         }
+        self._logger.debug(
+            "digest_event_publishing",
+            message="publishing digest lifecycle event",
+            run_id=run_id,
+            event_type=event_type,
+            status=status,
+        )
         await self._event_broker.publish(event)

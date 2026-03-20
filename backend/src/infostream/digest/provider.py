@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from infostream.core.logging import get_logger, sanitize_for_log
 from infostream.models.schemas import ItemRecord, LlmConfig
 
 
@@ -40,6 +41,13 @@ class StubSummarizerProvider(SummarizerProvider):
     """Deterministic provider used for v1 while real model integrations are out of scope."""
 
     def summarize(self, items: list[ItemRecord], interests_text: str, llm: LlmConfig) -> str:
+        logger = get_logger("digest.provider.stub")
+        logger.debug(
+            "stub_summarize_started",
+            message="stub summarizer invoked",
+            item_count=len(items),
+            llm_unique_id=llm.unique_id,
+        )
         _ = llm
         interests = self._parse_interests(interests_text)
         refs = [item.item_ref for item in items[:3]]
@@ -75,7 +83,9 @@ class StubSummarizerProvider(SummarizerProvider):
             "relations": [],
             "extraneous": "",
         }
-        return json.dumps(payload)
+        output = json.dumps(payload)
+        logger.debug("stub_summarize_completed", message="stub summarizer produced output")
+        return output
 
     def repair(
         self,
@@ -120,6 +130,7 @@ class OpenAICompatibleProvider(SummarizerProvider):
 
     def _call_chat_completions(self, llm: LlmConfig, prompt: str) -> str:
         """Submit chat completion request and return assistant text content."""
+        logger = get_logger("digest.provider.openai")
         base_url = str(llm.config.get("base_url", "https://api.openai.com/v1")).rstrip("/")
         api_key = llm.config.get("api_key")
         model = str(llm.config.get("model", llm.unique_id))
@@ -144,6 +155,14 @@ class OpenAICompatibleProvider(SummarizerProvider):
             # Request strict JSON output while preserving provider portability.
             "response_format": {"type": "json_object"},
         }
+        logger.info(
+            "openai_request_started",
+            message="calling openai-compatible chat completions",
+            base_url=base_url,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            has_organization=isinstance(organization, str) and bool(organization),
+        )
 
         with httpx.Client(timeout=timeout_seconds) as client:
             response = client.post(
@@ -153,12 +172,14 @@ class OpenAICompatibleProvider(SummarizerProvider):
             )
             response.raise_for_status()
             data = response.json()
-
-        content = (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content")
+        logger.info(
+            "openai_request_completed",
+            message="openai-compatible request completed",
+            status_code=response.status_code,
+            response_keys=sanitize_for_log(list(data.keys())),
         )
+
+        content = data.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("OpenAI-compatible provider returned empty content")
         return content
@@ -225,9 +246,25 @@ class ProviderRouter(SummarizerProvider):
 
     def _select_provider(self, llm: LlmConfig) -> SummarizerProvider:
         """Select provider in a way that can be expanded without API changes."""
+        logger = get_logger("digest.provider.router")
         if not llm.unique_id:
+            logger.warning(
+                "provider_select_failed", message="provider selection failed: llm not configured"
+            )
             raise RuntimeError("LLM is not configured")
 
         if llm.unique_id in {"stub-local", "stub-cloud", "stub"} or llm.name.startswith("stub"):
+            logger.debug(
+                "provider_selected",
+                message="provider selected stub",
+                provider="stub",
+                llm_unique_id=llm.unique_id,
+            )
             return self._stub_provider
+        logger.debug(
+            "provider_selected",
+            message="provider selected openai-compatible",
+            provider="openai_compatible",
+            llm_unique_id=llm.unique_id,
+        )
         return self._openai_provider

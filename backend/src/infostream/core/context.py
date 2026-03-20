@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from infostream.core.config import BackendConfig
 from infostream.core.events import EventBroker
 from infostream.core.files import ensure_system_layout
 from infostream.core.lockfile import remove_lockfile, write_lockfile
+from infostream.core.logging import get_logger
 from infostream.core.paths import BackendPaths, build_paths
 from infostream.core.state import StateStore
 from infostream.db.database import Database
@@ -34,10 +36,24 @@ class AppContext:
     scheduler: SchedulerService
     event_broker: EventBroker
     port: int
+    logger: Any
 
     async def startup(self) -> None:
+        app_logger = self.logger
+        app_logger.info(
+            "context_startup_layout",
+            message="initializing system layout",
+            root=str(self.paths.root),
+        )
         ensure_system_layout(self.paths, self.config)
+        app_logger.debug("context_startup_db_schema", message="initializing database schema")
         self.db.init_schema()
+        app_logger.debug(
+            "context_startup_lockfile_write",
+            message="writing daemon lockfile",
+            lockfile=str(self.paths.lockfile),
+            port=self.port,
+        )
         write_lockfile(
             self.paths.lockfile,
             LockfileRecord(
@@ -47,18 +63,30 @@ class AppContext:
                 started_at=now_rfc3339(),
             ),
         )
+        app_logger.debug("context_startup_scheduler_start", message="starting scheduler")
         await self.scheduler.start()
+        app_logger.info("context_startup_completed", message="context startup completed")
 
     async def shutdown(self) -> None:
+        app_logger = self.logger
+        app_logger.info("context_shutdown_started", message="context shutdown started")
         await self.scheduler.stop()
+        app_logger.debug(
+            "context_shutdown_lockfile_remove",
+            message="removing lockfile during shutdown",
+            lockfile=str(self.paths.lockfile),
+        )
         remove_lockfile(self.paths.lockfile)
         self.db.close()
+        app_logger.info("context_shutdown_completed", message="context shutdown completed")
 
 
 def create_context(config: BackendConfig, port: int) -> AppContext:
     """Create and wire all backend services for one daemon process."""
+    app_logger = get_logger("core.context")
     paths = build_paths(config)
     paths.root.mkdir(parents=True, exist_ok=True)
+    paths.logs_dir.mkdir(parents=True, exist_ok=True)
     db = Database(paths.db)
     state_store = StateStore(paths)
     source_manager = SourceManager(paths, config)
@@ -91,4 +119,5 @@ def create_context(config: BackendConfig, port: int) -> AppContext:
         scheduler=scheduler,
         event_broker=event_broker,
         port=port,
+        logger=app_logger,
     )

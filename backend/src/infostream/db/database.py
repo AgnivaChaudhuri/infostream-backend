@@ -4,13 +4,15 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from infostream.core.logging import get_logger
 from infostream.models.schemas import DigestRecord, ItemRecord, RunRecord, RunSourceResult
 
 
 class Database:
     def __init__(self, path: Path) -> None:
+        self._logger = get_logger("db.database")
         self._path = path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
@@ -18,6 +20,9 @@ class Database:
         with self._conn:
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA foreign_keys=ON;")
+        self._logger.info(
+            "db_initialized", message="database connection initialized", path=str(path)
+        )
 
     @property
     def path(self) -> Path:
@@ -26,6 +31,7 @@ class Database:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+        self._logger.info("db_closed", message="database connection closed")
 
     def init_schema(self) -> None:
         # Create tables and indexes
@@ -108,6 +114,7 @@ class Database:
                 );
                 """
             )
+        self._logger.info("db_schema_initialized", message="database schema initialized")
 
     def _row_to_item(self, row: sqlite3.Row) -> ItemRecord:
         # Return the item in the DB at the given row
@@ -135,7 +142,7 @@ class Database:
                 (item.source_uid, item.external_id),
             ).fetchone()
             if row is not None:
-                return row
+                return cast(sqlite3.Row, row)
 
         if item.url:
             row = cur.execute(
@@ -143,18 +150,19 @@ class Database:
                 (item.source_uid, item.url),
             ).fetchone()
             if row is not None:
-                return row
+                return cast(sqlite3.Row, row)
 
-        return cur.execute(
+        row = cur.execute(
             "SELECT * FROM items WHERE source_uid = ? AND content_hash = ?",
             (item.source_uid, item.content_hash),
         ).fetchone()
+        return cast(sqlite3.Row | None, row)
 
     def upsert_item(self, item: ItemRecord, seen_at: str) -> tuple[bool, ItemRecord]:
         # Insert new item if new, or update last_seen_at if duplicate
         with self._lock, self._conn:
             existing = self._lookup_duplicate(item)
-            if existing is not None: # If duplicate, update metadata
+            if existing is not None:  # If duplicate, update metadata
                 self._conn.execute(
                     """
                     UPDATE items
@@ -178,11 +186,12 @@ class Database:
                 assert row is not None
                 return False, self._row_to_item(row)
 
-            self._conn.execute( # If not in DB then insert the item into the DB anew
+            self._conn.execute(  # If not in DB then insert the item into the DB anew
                 """
                 INSERT INTO items (
                     item_ref, source_uid, external_id, url, title, created_at,
-                    ingested_at, content_text, content_hash, media_refs_json, tags_json, last_seen_at
+                    ingested_at, content_text, content_hash,
+                    media_refs_json, tags_json, last_seen_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -200,7 +209,9 @@ class Database:
                     seen_at,
                 ),
             )
-            row = self._conn.execute("SELECT * FROM items WHERE item_ref = ?", (item.item_ref,)).fetchone()
+            row = self._conn.execute(
+                "SELECT * FROM items WHERE item_ref = ?", (item.item_ref,)
+            ).fetchone()
             assert row is not None
             return True, self._row_to_item(row)
 
@@ -248,6 +259,13 @@ class Database:
                     run.raw_llm_output,
                 ),
             )
+        self._logger.debug(
+            "db_run_created",
+            message="created run record",
+            run_id=run.run_id,
+            trigger=run.trigger,
+            status=run.status,
+        )
 
     # Update run status and fields if a run is already in the DB
     def update_run(
@@ -271,6 +289,14 @@ class Database:
                 """,
                 (status, finished_at, digest_id, error_code, error_message, raw_llm_output, run_id),
             )
+        self._logger.debug(
+            "db_run_updated",
+            message="updated run record",
+            run_id=run_id,
+            status=status,
+            error_code=error_code,
+            digest_id=digest_id,
+        )
 
     # Get the run which corresponds to a given run_id
     def get_run(self, run_id: str) -> RunRecord | None:
@@ -328,6 +354,15 @@ class Database:
                     result.stderr_tail,
                 ),
             )
+        self._logger.debug(
+            "db_run_source_result_added",
+            message="added run source result",
+            run_id=run_id,
+            source_uid=result.source_uid,
+            status=result.status,
+            duration_ms=result.duration_ms,
+            items_ingested_count=result.items_ingested_count,
+        )
 
     # Fetch the results from a given run and source
     def list_run_source_results(self, run_id: str) -> list[RunSourceResult]:
@@ -368,6 +403,13 @@ class Database:
                     json.dumps(digest.output_json),
                 ),
             )
+        self._logger.debug(
+            "db_digest_created",
+            message="created digest record",
+            digest_id=digest.digest_id,
+            run_id=digest.run_id,
+            version=digest.version,
+        )
 
     # Fetch the latest digest
     def get_current_digest(self) -> DigestRecord | None:
@@ -422,7 +464,7 @@ class Database:
             ).fetchone()
         if row is None:
             return None
-        return row["next_cursor"]
+        return cast(str | None, row["next_cursor"])
 
     # Look up an item by its citation metadata
     def get_items_by_refs(self, refs: list[str]) -> list[dict[str, Any]]:
@@ -431,7 +473,10 @@ class Database:
         placeholders = ",".join(["?"] * len(refs))
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT item_ref, source_uid, title, url FROM items WHERE item_ref IN ({placeholders})",
+                (
+                    "SELECT item_ref, source_uid, title, url "
+                    f"FROM items WHERE item_ref IN ({placeholders})"
+                ),
                 tuple(refs),
             ).fetchall()
         ordered: list[dict[str, Any]] = []

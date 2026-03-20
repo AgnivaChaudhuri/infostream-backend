@@ -1,10 +1,18 @@
 :root {
-  --bg: #f5f0e8;
-  --panel: #fffdf8;
-  --ink: #1f2a2c;
-  --accent: #12664f;
-  --accent-soft: #e2f1ec;
-  --border: #d5d0c7;
+  --bg: #f6f3ec;
+  --panel: #fffdf9;
+  --ink: #1a272c;
+  --accent: #0f6a50;
+  --accent-hover: #148162;
+  --accent-soft: #e1f2ec;
+  --muted: #627176;
+  --border: #d7d2c7;
+  --status-ok-bg: #e4f7ee;
+  --status-ok-ink: #0f6a50;
+  --status-error-bg: #fde8e8;
+  --status-error-ink: #8f1f1f;
+  --status-info-bg: #edf4f8;
+  --status-info-ink: #1f5169;
 }
 
 * {
@@ -14,12 +22,12 @@
 body {
   margin: 0;
   font-family: "Source Sans 3", "Segoe UI", sans-serif;
-  background: radial-gradient(circle at top right, #eaf7ef, var(--bg));
   color: var(--ink);
+  background: radial-gradient(circle at top right, #eaf7ef, var(--bg));
 }
 
 #app {
-  max-width: 1200px;
+  max-width: 1240px;
   margin: 0 auto;
   padding: 1rem;
   display: grid;
@@ -29,8 +37,9 @@ body {
 .panel {
   border: 1px solid var(--border);
   background: var(--panel);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 1rem;
+  box-shadow: 0 2px 8px rgba(31, 42, 44, 0.04);
 }
 
 h1,
@@ -45,17 +54,26 @@ h2 {
   margin-bottom: 0.75rem;
 }
 
-button {
-  background: var(--accent);
-  color: white;
-  border: 0;
-  border-radius: 8px;
-  padding: 0.45rem 0.75rem;
-  cursor: pointer;
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
 }
 
-button.secondary {
-  background: #3b4f52;
+label {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--ink);
+  margin-bottom: 0.75rem;
 }
 
 input,
@@ -63,46 +81,146 @@ textarea,
 select {
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0.45rem;
+  padding: 0.5rem;
   width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: #fff;
 }
 
 textarea {
-  min-height: 6rem;
+  min-height: 6.5rem;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.46rem 0.75rem;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, transform 80ms ease, opacity 120ms ease;
+}
+
+button:hover {
+  background: var(--accent-hover);
+}
+
+button:active,
+button.is-pressed {
+  transform: translateY(1px) scale(0.995);
+}
+
+button.secondary {
+  background: #3f5559;
+}
+
+button.secondary:hover {
+  background: #4e676c;
+}
+
+button.is-busy {
+  opacity: 0.72;
+}
+
+button:disabled {
+  cursor: not-allowed;
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 1rem;
 }
 
 .table {
   width: 100%;
   border-collapse: collapse;
+  margin-bottom: 0.75rem;
 }
 
-.table td,
-.table th {
+.table th,
+.table td {
   border: 1px solid var(--border);
   padding: 0.45rem;
+  vertical-align: top;
   font-size: 0.9rem;
 }
 
-pre {
-  background: #11161a;
-  color: #d2e6da;
+.table th {
+  background: #f7f4ee;
+}
+
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.status-line {
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.status-ok {
+  background: var(--status-ok-bg);
+  color: var(--status-ok-ink);
+}
+
+.status-error {
+  background: var(--status-error-bg);
+  color: var(--status-error-ink);
+}
+
+.status-info {
+  background: var(--status-info-bg);
+  color: var(--status-info-ink);
+}
+
+.json-details {
+  margin-top: 0.45rem;
+}
+
+.json-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+  font-weight: 600;
+}
+
+.json-output {
+  margin-top: 0.45rem;
+  background: #10171b;
+  color: #d4e9dd;
   border-radius: 10px;
   padding: 0.75rem;
-  max-height: 260px;
+  max-height: 250px;
   overflow: auto;
+}
+
+.events-list {
+  margin: 0.5rem 0;
+  padding-left: 1rem;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.events-list li {
+  margin: 0.3rem 0;
+  font-size: 0.92rem;
 }
 
 .badge {
   display: inline-block;
   background: var(--accent-soft);
   color: var(--accent);
-  border-radius: 6px;
-  padding: 0.2rem 0.4rem;
+  border-radius: 8px;
+  padding: 0.2rem 0.45rem;
   margin-left: 0.5rem;
+  font-size: 0.88rem;
 }

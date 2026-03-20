@@ -16,6 +16,7 @@ class BackendConfig(BaseSettings):
     api_version: str = "v0"
     db_filename: str = "infostream.db"
     lockfile_name: str = "daemon.lock"
+    logs_dirname: str = "logs"
     settings_filename: str = "settings.json"
     installed_sources_filename: str = "installed_sources.json"
     sources_dirname: str = "sources"
@@ -35,5 +36,10 @@ class BackendConfig(BaseSettings):
 
     one_shot_schedule_sentinel: str = "9999-12-31T23:59:59Z"
     unavailable_llm_ids: set[str] = Field(default_factory=set)
+
+    # Logging defaults prioritize detailed debugging visibility.
+    log_level: str = "DEBUG"
+    log_rotation_max_bytes: int = 20 * 1024 * 1024
+    log_rotation_backup_count: int = 5
 
     home: Path | None = None

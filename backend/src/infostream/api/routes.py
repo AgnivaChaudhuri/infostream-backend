@@ -13,6 +13,7 @@ from starlette.responses import StreamingResponse
 
 from infostream.api.responses import error, success
 from infostream.core.context import AppContext
+from infostream.core.logging import get_logger
 from infostream.core.validation import parse_rfc3339
 from infostream.digest.service import DigestBusyError, RunAlreadyFinishedError, RunNotFoundError
 from infostream.models.schemas import InstallSourceRequest, LlmRequest, ScheduleRequest
@@ -20,7 +21,8 @@ from infostream.sources.manager import SourceError
 
 # This file implements all the API endpoints
 
-router = APIRouter() # The standard API router used in FastAPI
+router = APIRouter()  # The standard API router used in FastAPI
+LOGGER = get_logger("api.routes")
 
 
 def _ctx(request: Request) -> AppContext:
@@ -80,8 +82,12 @@ async def sources_installed(request: Request) -> Any:
     ctx = _ctx(request)
     try:
         sources = [source.model_dump() for source in ctx.source_manager.list_installed()]
+        LOGGER.debug(
+            "sources_installed_loaded", message="loaded installed sources", count=len(sources)
+        )
         return success("Installed sources loaded", {"sources": sources})
     except (FileNotFoundError, json.JSONDecodeError, ValidationError):
+        LOGGER.exception("sources_installed_failed", message="failed to load installed sources")
         return error("installed_sources.json is corrupted", "INTERNAL_ERROR", 500)
 
 
@@ -90,8 +96,10 @@ async def sources_enabled(request: Request) -> Any:
     ctx = _ctx(request)
     try:
         sources = [source.model_dump() for source in ctx.source_manager.list_enabled()]
+        LOGGER.debug("sources_enabled_loaded", message="loaded enabled sources", count=len(sources))
         return success("Enabled sources loaded", {"sources": sources})
     except (FileNotFoundError, json.JSONDecodeError, ValidationError):
+        LOGGER.exception("sources_enabled_failed", message="failed to read enabled sources")
         return error("Unable to read enabled sources", "INTERNAL_ERROR", 500)
 
 
@@ -100,10 +108,23 @@ async def source_enable(request: Request, source_uid: str) -> Any:
     ctx = _ctx(request)
     try:
         source = ctx.source_manager.enable(source_uid)
+        LOGGER.info("source_enabled", message="source enabled", source_uid=source_uid)
         return success("Source enabled", source.model_dump())
     except SourceError as exc:
+        LOGGER.warning(
+            "source_enable_rejected",
+            message="source enable rejected",
+            source_uid=source_uid,
+            error_code=exc.error_code,
+            detail=exc.message,
+        )
         return error(exc.message, exc.error_code, exc.status_code)
     except OSError:
+        LOGGER.exception(
+            "source_enable_failed",
+            message="source enable failed due to os error",
+            source_uid=source_uid,
+        )
         return error("Internal failure enabling source", "INTERNAL_ERROR", 500)
 
 
@@ -112,34 +133,65 @@ async def source_disable(request: Request, source_uid: str) -> Any:
     ctx = _ctx(request)
     try:
         source = ctx.source_manager.disable(source_uid)
+        LOGGER.info("source_disabled", message="source disabled", source_uid=source_uid)
         return success("Source disabled", source.model_dump())
     except SourceError as exc:
+        LOGGER.warning(
+            "source_disable_rejected",
+            message="source disable rejected",
+            source_uid=source_uid,
+            error_code=exc.error_code,
+            detail=exc.message,
+        )
         return error(exc.message, exc.error_code, exc.status_code)
     except OSError:
+        LOGGER.exception(
+            "source_disable_failed",
+            message="source disable failed due to os error",
+            source_uid=source_uid,
+        )
         return error("Failure writing source state", "INTERNAL_ERROR", 500)
 
 
 @router.post("/sources/install")
 async def source_install(request: Request, payload: InstallSourceRequest) -> Any:
     ctx = _ctx(request)
+    LOGGER.info(
+        "source_install_requested", message="source install requested", source_path=payload.path
+    )
     try:
         source = ctx.source_manager.install(Path(payload.path))
+        LOGGER.info("source_installed", message="source installed", source_uid=source.uid)
         return success("Source installed", source.model_dump(), status_code=201)
     except SourceError as exc:
+        LOGGER.warning(
+            "source_install_rejected",
+            message="source install rejected",
+            source_path=payload.path,
+            error_code=exc.error_code,
+            detail=exc.message,
+        )
         return error(exc.message, exc.error_code, exc.status_code)
 
 
 @router.delete("/sources/{source_uid}")
 async def source_uninstall(request: Request, source_uid: str) -> Any:
     ctx = _ctx(request)
-    in_use = (
-        source_uid in ctx.digest_service.active_sources()
-        or ctx.db.run_is_active_for_source(source_uid)
+    in_use = source_uid in ctx.digest_service.active_sources() or ctx.db.run_is_active_for_source(
+        source_uid
     )
     try:
         ctx.source_manager.uninstall(source_uid, in_use=in_use)
+        LOGGER.info("source_uninstalled", message="source uninstalled", source_uid=source_uid)
         return success("Source uninstalled")
     except SourceError as exc:
+        LOGGER.warning(
+            "source_uninstall_rejected",
+            message="source uninstall rejected",
+            source_uid=source_uid,
+            error_code=exc.error_code,
+            detail=exc.message,
+        )
         return error(exc.message, exc.error_code, exc.status_code)
 
 
@@ -161,14 +213,21 @@ async def interests_put(request: Request) -> Any:
         raw_body = await request.body()
         interests = _parse_interests_payload(raw_body)
     except ValueError as exc:
+        LOGGER.warning(
+            "interests_invalid_payload",
+            message="invalid interests payload",
+            detail=str(exc),
+        )
         return error(str(exc), "INVALID_INTERESTS", 400)
 
     try:
         settings = ctx.state_store.read_settings()
         settings.interests = interests
         ctx.state_store.write_settings(settings)
+        LOGGER.info("interests_updated", message="interests updated", length=len(interests))
         return success("Interests updated", {"interests": interests})
     except OSError:
+        LOGGER.exception("interests_write_failed", message="failed to write interests settings")
         return error("Failed to write settings", "INTERNAL_ERROR", 500)
 
 
@@ -190,8 +249,19 @@ async def llm_put(request: Request, payload: LlmRequest) -> Any:
     ctx = _ctx(request)
 
     if not payload.unique_id.strip():
+        LOGGER.warning(
+            "llm_put_rejected",
+            message="llm put rejected empty unique_id",
+            error_code="LLM_NOT_FOUND",
+        )
         return error("Model is not installed", "LLM_NOT_FOUND", 422)
     if payload.unique_id in ctx.config.unavailable_llm_ids:
+        LOGGER.warning(
+            "llm_put_rejected",
+            message="llm put rejected unavailable model",
+            error_code="LLM_UNAVAILABLE",
+            unique_id=payload.unique_id,
+        )
         return error("Model is unavailable", "LLM_UNAVAILABLE", 503)
 
     settings = ctx.state_store.read_settings()
@@ -200,6 +270,12 @@ async def llm_put(request: Request, payload: LlmRequest) -> Any:
     settings.llm.unique_id = payload.unique_id
     settings.llm.config = payload.config
     ctx.state_store.write_settings(settings)
+    LOGGER.info(
+        "llm_updated",
+        message="llm configuration updated",
+        unique_id=payload.unique_id,
+        mode=payload.mode,
+    )
     return success("LLM configuration updated", settings.llm.model_dump())
 
 
@@ -207,14 +283,28 @@ async def llm_put(request: Request, payload: LlmRequest) -> Any:
 async def digest_run(request: Request) -> Any:
     ctx = _ctx(request)
     if not ctx.scheduler.is_running():
+        LOGGER.warning(
+            "digest_run_rejected",
+            message="digest run rejected scheduler not ready",
+            error_code="DIGEST_BUSY",
+        )
         return error("Scheduler is not ready", "DIGEST_BUSY", 503)
 
     try:
         run_id = await ctx.digest_service.launch_run("manual")
+        LOGGER.info("digest_run_accepted", message="manual digest run accepted", run_id=run_id)
         return success("Digest run accepted", {"run_id": run_id}, status_code=202)
     except DigestBusyError:
+        LOGGER.warning(
+            "digest_run_rejected",
+            message="digest run rejected already running",
+            error_code="DIGEST_ALREADY_RUNNING",
+        )
         return error("Digest already running", "DIGEST_ALREADY_RUNNING", 409)
     except Exception:
+        LOGGER.exception(
+            "digest_run_failed", message="digest run launch failed", error_code="RUN_FAILED"
+        )
         return error("Failure launching run", "RUN_FAILED", 500)
 
 
@@ -224,9 +314,21 @@ async def digest_schedule(request: Request, payload: ScheduleRequest) -> Any:
     try:
         _ = parse_rfc3339(payload.schedule)
     except ValueError:
+        LOGGER.warning(
+            "digest_schedule_rejected",
+            message="digest schedule rejected invalid rfc3339",
+            error_code="INVALID_SCHEDULE",
+            schedule=payload.schedule,
+        )
         return error("Invalid schedule; expected RFC3339 with timezone", "INVALID_SCHEDULE", 422)
 
     if payload.run_every and payload.spacing <= 0:
+        LOGGER.warning(
+            "digest_schedule_rejected",
+            message="digest schedule rejected invalid spacing",
+            error_code="INVALID_SCHEDULE",
+            spacing=payload.spacing,
+        )
         return error("Invalid schedule spacing", "INVALID_SCHEDULE", 422)
 
     try:
@@ -235,8 +337,20 @@ async def digest_schedule(request: Request, payload: ScheduleRequest) -> Any:
         settings.run_every = payload.run_every
         settings.spacing = payload.spacing
         ctx.state_store.write_settings(settings)
+        LOGGER.info(
+            "digest_schedule_updated",
+            message="digest schedule updated",
+            schedule=payload.schedule,
+            run_every=payload.run_every,
+            spacing=payload.spacing,
+        )
         return success("Schedule updated", settings.model_dump())
     except Exception:
+        LOGGER.exception(
+            "digest_schedule_failed",
+            message="digest schedule write failed",
+            error_code="SCHEDULER_ERROR",
+        )
         return error("Scheduler failure", "SCHEDULER_ERROR", 500)
 
 
@@ -288,10 +402,23 @@ async def runs_cancel(request: Request, run_id: str) -> Any:
     ctx = _ctx(request)
     try:
         await ctx.digest_service.cancel_run(run_id)
+        LOGGER.info("run_cancel_requested", message="run cancel requested", run_id=run_id)
         return success("Run cancel requested", {"run_id": run_id})
     except RunNotFoundError:
+        LOGGER.warning(
+            "run_cancel_rejected",
+            message="run cancel rejected missing run",
+            run_id=run_id,
+            error_code="RUN_NOT_FOUND",
+        )
         return error("Run not found", "RUN_NOT_FOUND", 404)
     except RunAlreadyFinishedError:
+        LOGGER.warning(
+            "run_cancel_rejected",
+            message="run cancel rejected terminal run",
+            run_id=run_id,
+            error_code="RUN_ALREADY_FINISHED",
+        )
         return error("Run already finished", "RUN_ALREADY_FINISHED", 409)
 
 
@@ -302,8 +429,19 @@ async def items_lookup(request: Request, refs: str = Query(default="")) -> Any:
     try:
         refs_list = _parse_refs_query(refs, ctx.config.items_lookup_max_refs)
     except ValueError as exc:
+        LOGGER.warning(
+            "items_lookup_invalid_refs",
+            message="invalid refs query",
+            detail=str(exc),
+        )
         return error(str(exc), "INVALID_REFS", 422)
     items = ctx.db.get_items_by_refs(refs_list)
+    LOGGER.debug(
+        "items_lookup_loaded",
+        message="items lookup resolved refs",
+        requested=len(refs_list),
+        found=len(items),
+    )
     return success("Items loaded", {"items": items})
 
 
@@ -311,6 +449,7 @@ async def items_lookup(request: Request, refs: str = Query(default="")) -> Any:
 async def events_stream(request: Request) -> StreamingResponse:
     """Server-Sent Events stream for run lifecycle notifications."""
     ctx = _ctx(request)
+    LOGGER.debug("events_stream_connected", message="sse subscriber connected")
     queue = await ctx.event_broker.subscribe()
 
     async def generator() -> Any:
@@ -326,5 +465,6 @@ async def events_stream(request: Request) -> StreamingResponse:
                     yield ": keepalive\n\n"
         finally:
             await ctx.event_broker.unsubscribe(queue)
+            LOGGER.debug("events_stream_disconnected", message="sse subscriber disconnected")
 
     return StreamingResponse(generator(), media_type="text/event-stream")

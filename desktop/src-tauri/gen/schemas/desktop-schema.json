@@ -183,6 +183,18 @@
           "markdownDescription": "Allow invoking bootstrap backend command"
         },
         {
+          "description": "Allow forwarding frontend log payloads to Rust logging sinks",
+          "type": "string",
+          "const": "allow-emit-frontend-log",
+          "markdownDescription": "Allow forwarding frontend log payloads to Rust logging sinks"
+        },
+        {
+          "description": "Allow invoking native source directory picker command",
+          "type": "string",
+          "const": "allow-pick-source-directory",
+          "markdownDescription": "Allow invoking native source directory picker command"
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
