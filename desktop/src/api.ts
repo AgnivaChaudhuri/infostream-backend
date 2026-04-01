@@ -1,9 +1,37 @@
-import type { ApiEnvelope, LlmConfigPayload, RunEvent, RunRecord, SourceRecord } from "./types";
+import type {
+  AdvancedSettingsPayload,
+  ApiEnvelope,
+  LlmConfigPayload,
+  RunEvent,
+  RunRecord,
+  SourceRecord
+} from "./types";
 import { createLogger } from "./logger";
 
 // This file centralizes all HTTP calls from the desktop UI to the backend API.
 // Each method maps to one backend endpoint and returns the typed response envelope.
 const LOGGER = createLogger("desktop.api");
+
+export type ApiTraceDirection = "send" | "receive";
+
+export type ApiTraceEntry = {
+  timestamp: string;
+  direction: ApiTraceDirection;
+  channel: "http" | "sse";
+  from: string;
+  to: string;
+  event: string;
+  details: Record<string, unknown>;
+};
+
+type ApiTraceObserver = (entry: ApiTraceEntry) => void;
+
+let TRACE_OBSERVER: ApiTraceObserver | null = null;
+
+// Register or clear a single observer for API/SSE trace events.
+export function setApiTraceObserver(observer: ApiTraceObserver | null): void {
+  TRACE_OBSERVER = observer;
+}
 
 function nowMs(): number {
   if (typeof performance !== "undefined") {
@@ -12,9 +40,41 @@ function nowMs(): number {
   return Date.now();
 }
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+// Emit a normalized trace event for the debug view if an observer is installed.
+function emitTrace(
+  channel: "http" | "sse",
+  direction: ApiTraceDirection,
+  from: string,
+  to: string,
+  event: string,
+  details: Record<string, unknown>
+): void {
+  if (!TRACE_OBSERVER) {
+    return;
+  }
+  TRACE_OBSERVER({
+    timestamp: nowIso(),
+    direction,
+    channel,
+    from,
+    to,
+    event,
+    details
+  });
+}
+
 async function request<T>(baseUrl: string, path: string, init?: RequestInit): Promise<ApiEnvelope<T>> {
+  // Wrap all HTTP requests with consistent logging and trace emission.
   const method = init?.method ?? "GET";
   const started = nowMs();
+  emitTrace("http", "send", "frontend.api", "backend.api", "request_started", {
+    method,
+    path
+  });
   LOGGER.debug("request_started", "HTTP request started", {
     method,
     path
@@ -36,10 +96,24 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
       ok: body.ok,
       error_code: body.error_code
     });
+    emitTrace("http", "receive", "backend.api", "frontend.api", "request_completed", {
+      method,
+      path,
+      status_code: response.status,
+      duration_ms: durationMs,
+      ok: body.ok,
+      error_code: body.error_code ?? null
+    });
     return body;
   } catch (error) {
     const durationMs = Math.round(nowMs() - started);
     LOGGER.error("request_failed", "HTTP request failed", {
+      method,
+      path,
+      duration_ms: durationMs,
+      error: String(error)
+    });
+    emitTrace("http", "receive", "backend.api", "frontend.api", "request_failed", {
       method,
       path,
       duration_ms: durationMs,
@@ -52,6 +126,7 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
 export class InfostreamApi {
   constructor(private readonly baseUrl: string) {}
 
+  // Endpoint wrappers below intentionally stay thin so UI actions map 1:1 to API routes.
   getHealth() {
     return request<{ api_version: string; scheduler_running: boolean; digest_running: boolean }>(
       this.baseUrl,
@@ -111,6 +186,23 @@ export class InfostreamApi {
     });
   }
 
+  getAdvancedSettings() {
+    return request<AdvancedSettingsPayload>(this.baseUrl, "/settings/advanced");
+  }
+
+  putAdvancedSettings(payload: AdvancedSettingsPayload) {
+    return request<AdvancedSettingsPayload>(this.baseUrl, "/settings/advanced", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+  }
+
+  resetAdvancedSettings() {
+    return request<AdvancedSettingsPayload>(this.baseUrl, "/settings/advanced/reset", {
+      method: "POST"
+    });
+  }
+
   runDigest() {
     return request<{ run_id: string }>(this.baseUrl, "/digest/run", { method: "POST" });
   }
@@ -153,13 +245,34 @@ export class InfostreamApi {
   }
 
   // Subscribe to backend Server-Sent Events for run lifecycle updates.
-  openEventsStream(onEvent: (event: RunEvent) => void, onError?: (event: Event) => void): EventSource {
+  openEventsStream(
+    onEvent: (event: RunEvent) => void,
+    onError?: (event: Event) => void,
+    onOpen?: () => void
+  ): EventSource {
+    emitTrace("sse", "send", "frontend.api", "backend.sse", "events_stream_connect", {
+      path: "/events/stream"
+    });
     LOGGER.info("events_stream_connecting", "Connecting to events stream", { path: "/events/stream" });
     const stream = new EventSource(`${this.baseUrl}/events/stream`);
-    stream.onmessage = (event) => {
+    stream.onopen = () => {
+      LOGGER.info("events_stream_open", "Events stream connection opened");
+      emitTrace("sse", "receive", "backend.sse", "frontend.api", "events_stream_open", {
+        path: "/events/stream"
+      });
+      if (onOpen) {
+        onOpen();
+      }
+    };
+    const handleEventPayload = (event: MessageEvent<string>) => {
       try {
         const payload = JSON.parse(event.data) as RunEvent;
         LOGGER.debug("events_stream_message", "Received events stream message", {
+          type: payload.type,
+          run_id: payload.run_id,
+          status: payload.status
+        });
+        emitTrace("sse", "receive", "backend.sse", "frontend.api", "events_stream_message", {
           type: payload.type,
           run_id: payload.run_id,
           status: payload.status
@@ -168,10 +281,21 @@ export class InfostreamApi {
       } catch {
         // Ignore malformed event payloads and keep stream alive.
         LOGGER.warn("events_stream_malformed_message", "Ignoring malformed events stream payload");
+        emitTrace("sse", "receive", "backend.sse", "frontend.api", "events_stream_malformed_message", {
+          payload: event.data
+        });
       }
     };
+    stream.onmessage = handleEventPayload;
+    // Compatibility for older backends that emit custom event names.
+    for (const eventName of ["run_started", "run_finished", "run_failed", "run_canceled"]) {
+      stream.addEventListener(eventName, (event) => {
+        handleEventPayload(event as MessageEvent<string>);
+      });
+    }
     stream.onerror = (event) => {
       LOGGER.warn("events_stream_error", "Events stream error received");
+      emitTrace("sse", "receive", "backend.sse", "frontend.api", "events_stream_error", {});
       if (onError) {
         onError(event);
       }

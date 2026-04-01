@@ -2,18 +2,27 @@ import "./styles.css";
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { InfostreamApi } from "./api";
+import { InfostreamApi, setApiTraceObserver, type ApiTraceEntry } from "./api";
 import { createLogger } from "./logger";
-import type { ApiEnvelope, LlmConfigPayload, RunEvent, SourceRecord } from "./types";
+import type {
+  AdvancedSettingsPayload,
+  ApiEnvelope,
+  BackendKillResult,
+  LlmConfigPayload,
+  RunEvent,
+  SourceRecord
+} from "./types";
 
 // This file renders the desktop UI, wires user actions to API calls,
 // and standardizes section-level status feedback with optional JSON details.
 
 type SectionId =
   | "health"
+  | "backend"
   | "sources"
   | "interests"
   | "llm"
+  | "advanced"
   | "schedule"
   | "runs"
   | "digest"
@@ -21,9 +30,100 @@ type SectionId =
   | "events";
 
 type ProviderChoice = "stub_local" | "stub_cloud" | "openai_compatible";
+type DebugDirection = "send" | "receive";
+type DebugChannel = "http" | "sse" | "tauri" | "ui";
+
+type DebugTraceEntry = {
+  timestamp: string;
+  direction: DebugDirection;
+  channel: DebugChannel;
+  from: string;
+  to: string;
+  event: string;
+  details: Record<string, unknown>;
+};
+
+type FlowNodeDef = {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type FlowEdgeDef = {
+  id: string;
+  from: string;
+  to: string;
+  label: string;
+};
+
+type DebugState = {
+  entries: DebugTraceEntry[];
+  activeEdgeIds: Set<string>;
+  activeNodeIds: Set<string>;
+};
 
 const EVENT_LIMIT = 50;
+const DEBUG_TRACE_LIMIT = 250;
 const UI_LOGGER = createLogger("desktop.ui");
+const DATA_FLOW_DIAGRAM = `Source (src_exec) -> src_output.json/src_media
+  -> Backend SourceExecutor/RunService -> SQLite + settings/state files
+  -> ProviderRouter
+     -> Stub provider (no network) OR OpenAI-compatible /chat/completions
+  -> digest output_json persisted in SQLite
+  -> Backend API (/digest/current, /runs/*, /items, /events/stream)
+  -> Frontend API client + UI rendering
+  -> Optional Tauri commands (bootstrap/spawn/kill/picker/log sink)`;
+
+const FLOW_NODES: FlowNodeDef[] = [
+  { id: "desktop.tauri", label: "Tauri Shell\n(bootstrap/kill/picker)", x: 80, y: 50, width: 250, height: 74 },
+  { id: "frontend.ui", label: "Frontend UI", x: 80, y: 200, width: 250, height: 74 },
+  { id: "frontend.api", label: "Frontend API Client", x: 400, y: 200, width: 250, height: 74 },
+  { id: "backend.api", label: "Backend API", x: 720, y: 200, width: 250, height: 74 },
+  { id: "backend.sse", label: "Backend SSE Stream", x: 720, y: 330, width: 250, height: 74 },
+  { id: "backend.digest", label: "DigestRunService", x: 720, y: 470, width: 250, height: 74 },
+  { id: "backend.source_executor", label: "SourceExecutor", x: 400, y: 470, width: 250, height: 74 },
+  { id: "source.src_exec", label: "Source src_exec", x: 80, y: 470, width: 250, height: 74 },
+  { id: "source.src_output", label: "src_output.json/src_media", x: 80, y: 620, width: 250, height: 74 },
+  { id: "backend.sqlite", label: "SQLite (items/runs/digests)", x: 400, y: 620, width: 250, height: 74 },
+  { id: "backend.filesystem", label: "System Files + lt_media", x: 720, y: 620, width: 250, height: 74 },
+  { id: "backend.provider_router", label: "ProviderRouter", x: 1040, y: 470, width: 250, height: 74 },
+  { id: "llm.stub", label: "Stub Provider", x: 1360, y: 390, width: 250, height: 74 },
+  { id: "llm.openai", label: "OpenAI-Compatible", x: 1360, y: 540, width: 250, height: 74 },
+  { id: "cloud.llm_endpoint", label: "Cloud LLM Endpoint", x: 1360, y: 690, width: 250, height: 74 }
+];
+
+const FLOW_EDGES: FlowEdgeDef[] = [
+  { id: "ui_to_tauri", from: "frontend.ui", to: "desktop.tauri", label: "invoke command" },
+  { id: "tauri_to_backend", from: "desktop.tauri", to: "backend.api", label: "spawn/health reuse" },
+  { id: "ui_to_frontend_api", from: "frontend.ui", to: "frontend.api", label: "action -> request" },
+  { id: "frontend_api_to_backend_api", from: "frontend.api", to: "backend.api", label: "HTTP request" },
+  { id: "backend_api_to_frontend_api", from: "backend.api", to: "frontend.api", label: "HTTP response" },
+  { id: "frontend_api_to_ui", from: "frontend.api", to: "frontend.ui", label: "render/update" },
+  { id: "frontend_api_to_backend_sse", from: "frontend.api", to: "backend.sse", label: "SSE connect" },
+  { id: "backend_sse_to_frontend_api", from: "backend.sse", to: "frontend.api", label: "event stream" },
+  { id: "backend_api_to_digest", from: "backend.api", to: "backend.digest", label: "launch/run fetch" },
+  { id: "digest_to_source_executor", from: "backend.digest", to: "backend.source_executor", label: "execute source" },
+  { id: "source_executor_to_src_exec", from: "backend.source_executor", to: "source.src_exec", label: "spawn src_exec" },
+  { id: "src_exec_to_src_output", from: "source.src_exec", to: "source.src_output", label: "write output/media" },
+  { id: "src_output_to_source_executor", from: "source.src_output", to: "backend.source_executor", label: "parse output" },
+  { id: "source_executor_to_sqlite", from: "backend.source_executor", to: "backend.sqlite", label: "upsert items/cursors" },
+  { id: "source_executor_to_filesystem", from: "backend.source_executor", to: "backend.filesystem", label: "media ingest" },
+  { id: "digest_to_provider_router", from: "backend.digest", to: "backend.provider_router", label: "summarize/repair" },
+  { id: "provider_router_to_stub", from: "backend.provider_router", to: "llm.stub", label: "local stub branch" },
+  { id: "provider_router_to_openai", from: "backend.provider_router", to: "llm.openai", label: "cloud branch" },
+  { id: "openai_to_cloud", from: "llm.openai", to: "cloud.llm_endpoint", label: "chat completions HTTP" },
+  { id: "stub_to_digest", from: "llm.stub", to: "backend.digest", label: "stub output" },
+  { id: "openai_to_digest", from: "llm.openai", to: "backend.digest", label: "model output" },
+  { id: "digest_to_sqlite", from: "backend.digest", to: "backend.sqlite", label: "persist digest/run" },
+  { id: "backend_api_to_sqlite", from: "backend.api", to: "backend.sqlite", label: "load items/runs/digests" },
+  { id: "backend_api_to_filesystem", from: "backend.api", to: "backend.filesystem", label: "settings/sources/lockfile" }
+];
+
+const FLOW_EDGE_MAP = new Map(FLOW_EDGES.map((edge) => [edge.id, edge]));
+const FLOW_NODE_MAP = new Map(FLOW_NODES.map((node) => [node.id, node]));
 
 function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -46,6 +146,301 @@ function getElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+// Keep long payload previews readable in the debug table.
+function trimDetailValue(value: unknown): string {
+  const text = typeof value === "string" ? value : formatJson(value);
+  if (text.length <= 240) {
+    return text;
+  }
+  return `${text.slice(0, 240)}...[truncated]`;
+}
+
+function flowNodeCenter(nodeId: string): { x: number; y: number } {
+  const node = FLOW_NODE_MAP.get(nodeId);
+  if (!node) {
+    return { x: 0, y: 0 };
+  }
+  return { x: node.x + node.width / 2, y: node.y + node.height / 2 };
+}
+
+function activateFlowEdge(state: DebugState, edgeId: string): void {
+  const edge = FLOW_EDGE_MAP.get(edgeId);
+  if (!edge) {
+    return;
+  }
+  state.activeEdgeIds.add(edgeId);
+  state.activeNodeIds.add(edge.from);
+  state.activeNodeIds.add(edge.to);
+}
+
+function activateFlowEdgesForTrace(state: DebugState, entry: DebugTraceEntry): void {
+  const path = String(entry.details.path ?? "");
+
+  if (entry.channel === "tauri") {
+    activateFlowEdge(state, "ui_to_tauri");
+    if (entry.event.startsWith("bootstrap_backend")) {
+      activateFlowEdge(state, "tauri_to_backend");
+    }
+  }
+
+  if (entry.channel === "http" && entry.event === "request_started") {
+    activateFlowEdge(state, "ui_to_frontend_api");
+    activateFlowEdge(state, "frontend_api_to_backend_api");
+
+    if (path.startsWith("/digest") || path.startsWith("/runs")) {
+      activateFlowEdge(state, "backend_api_to_digest");
+    }
+    if (path.startsWith("/items") || path.startsWith("/digest") || path.startsWith("/runs")) {
+      activateFlowEdge(state, "backend_api_to_sqlite");
+    }
+    if (
+      path.startsWith("/sources") ||
+      path.startsWith("/interests") ||
+      path.startsWith("/llm") ||
+      path.startsWith("/settings")
+    ) {
+      activateFlowEdge(state, "backend_api_to_filesystem");
+    }
+  }
+
+  if (entry.channel === "http" && (entry.event === "request_completed" || entry.event === "request_failed")) {
+    activateFlowEdge(state, "backend_api_to_frontend_api");
+    activateFlowEdge(state, "frontend_api_to_ui");
+  }
+
+  if (entry.channel === "sse" && entry.event === "events_stream_connect") {
+    activateFlowEdge(state, "ui_to_frontend_api");
+    activateFlowEdge(state, "frontend_api_to_backend_sse");
+  }
+
+  if (entry.channel === "sse" && entry.event.startsWith("events_stream_")) {
+    activateFlowEdge(state, "backend_sse_to_frontend_api");
+    activateFlowEdge(state, "frontend_api_to_ui");
+  }
+
+  if (entry.event === "run_accepted") {
+    activateFlowEdge(state, "backend_api_to_digest");
+  }
+
+  if (entry.event === "source_result_loaded" || entry.from.startsWith("source.")) {
+    activateFlowEdge(state, "digest_to_source_executor");
+    activateFlowEdge(state, "source_executor_to_src_exec");
+    activateFlowEdge(state, "src_exec_to_src_output");
+    activateFlowEdge(state, "src_output_to_source_executor");
+    activateFlowEdge(state, "source_executor_to_sqlite");
+    activateFlowEdge(state, "source_executor_to_filesystem");
+  }
+
+  if (entry.event === "raw_llm_output_attached") {
+    const provider = String(entry.details.provider ?? "unknown");
+    activateFlowEdge(state, "digest_to_provider_router");
+    if (provider === "stub") {
+      activateFlowEdge(state, "provider_router_to_stub");
+      activateFlowEdge(state, "stub_to_digest");
+    } else {
+      activateFlowEdge(state, "provider_router_to_openai");
+      activateFlowEdge(state, "openai_to_cloud");
+      activateFlowEdge(state, "openai_to_digest");
+    }
+  }
+
+  if (entry.event === "digest_payload_loaded" || entry.event === "digest_history_loaded") {
+    activateFlowEdge(state, "digest_to_sqlite");
+    activateFlowEdge(state, "backend_api_to_sqlite");
+    activateFlowEdge(state, "backend_api_to_frontend_api");
+    activateFlowEdge(state, "frontend_api_to_ui");
+  }
+
+  if (entry.event === "sources_snapshot_loaded") {
+    activateFlowEdge(state, "backend_api_to_filesystem");
+    activateFlowEdge(state, "backend_api_to_frontend_api");
+    activateFlowEdge(state, "frontend_api_to_ui");
+  }
+}
+
+function renderFlowchartSvg(state: DebugState): string {
+  const edges = FLOW_EDGES.map((edge) => {
+    const from = flowNodeCenter(edge.from);
+    const to = flowNodeCenter(edge.to);
+    const active = state.activeEdgeIds.has(edge.id);
+    const marker = active ? "flow-arrow-active" : "flow-arrow";
+    const labelX = (from.x + to.x) / 2;
+    const labelY = (from.y + to.y) / 2 - 6;
+    return `
+      <g>
+        <line
+          x1="${from.x}"
+          y1="${from.y}"
+          x2="${to.x}"
+          y2="${to.y}"
+          class="flow-edge${active ? " active" : ""}"
+          marker-end="url(#${marker})"
+        />
+        <text x="${labelX}" y="${labelY}" class="flow-edge-label">${escapeHtml(edge.label)}</text>
+      </g>
+    `;
+  }).join("");
+
+  const nodes = FLOW_NODES.map((node) => {
+    const active = state.activeNodeIds.has(node.id);
+    const lines = node.label.split("\n");
+    const text = lines
+      .map((line, index) => {
+        return `<tspan x="${node.x + node.width / 2}" dy="${index === 0 ? 0 : 16}">${escapeHtml(line)}</tspan>`;
+      })
+      .join("");
+    return `
+      <g>
+        <rect
+          x="${node.x}"
+          y="${node.y}"
+          width="${node.width}"
+          height="${node.height}"
+          rx="10"
+          class="flow-node${active ? " active" : ""}"
+        />
+        <text x="${node.x + node.width / 2}" y="${node.y + node.height / 2 - (lines.length > 1 ? 8 : 0)}" class="flow-node-label">
+          ${text}
+        </text>
+      </g>
+    `;
+  }).join("");
+
+  return `
+    <svg viewBox="0 0 1700 820" role="img" aria-label="Infostream debug flowchart">
+      <defs>
+        <marker id="flow-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#111111"></path>
+        </marker>
+        <marker id="flow-arrow-active" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#c5162b"></path>
+        </marker>
+      </defs>
+      ${edges}
+      ${nodes}
+    </svg>
+  `;
+}
+
+// Append newest-first trace entries and enforce bounded memory usage.
+function appendDebugTrace(state: DebugState, entry: DebugTraceEntry): void {
+  state.entries.unshift(entry);
+  if (state.entries.length > DEBUG_TRACE_LIMIT) {
+    state.entries.length = DEBUG_TRACE_LIMIT;
+  }
+  activateFlowEdgesForTrace(state, entry);
+}
+
+// Render full trace history into table rows.
+function debugTraceRows(state: DebugState): string {
+  return state.entries
+    .map((entry) => {
+      const details = escapeHtml(trimDetailValue(entry.details));
+      return `
+        <tr>
+          <td><code>${escapeHtml(entry.timestamp)}</code></td>
+          <td>${escapeHtml(entry.channel)}</td>
+          <td>${escapeHtml(entry.direction)}</td>
+          <td><code>${escapeHtml(entry.from)}</code></td>
+          <td><code>${escapeHtml(entry.to)}</code></td>
+          <td>${escapeHtml(entry.event)}</td>
+          <td><pre>${details}</pre></td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+// Collapse trace history into one "latest event" row per communication edge.
+function debugEdgeSummaryRows(state: DebugState): string {
+  const latestByEdge = new Map<string, DebugTraceEntry>();
+  for (const entry of state.entries) {
+    const edge = `${entry.from} -> ${entry.to} (${entry.channel})`;
+    if (!latestByEdge.has(edge)) {
+      latestByEdge.set(edge, entry);
+    }
+  }
+
+  return Array.from(latestByEdge.entries())
+    .map(([edge, entry]) => {
+      const details = escapeHtml(trimDetailValue(entry.details));
+      return `
+        <tr>
+          <td>${escapeHtml(edge)}</td>
+          <td>${escapeHtml(entry.event)}</td>
+          <td><code>${escapeHtml(entry.timestamp)}</code></td>
+          <td><pre>${details}</pre></td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+// Render the debug view's derived edge summary and full event timeline.
+function renderDebugView(state: DebugState): void {
+  const flowchart = getElement<HTMLDivElement>("debug-flowchart");
+  flowchart.innerHTML = renderFlowchartSvg(state);
+
+  const tableBody = getElement<HTMLTableSectionElement>("debug-trace-body");
+  tableBody.innerHTML =
+    debugTraceRows(state) ||
+    `<tr><td colspan="7"><span class="status-line status-info">No trace events yet.</span></td></tr>`;
+
+  const edgeBody = getElement<HTMLTableSectionElement>("debug-edge-body");
+  edgeBody.innerHTML =
+    debugEdgeSummaryRows(state) ||
+    `<tr><td colspan="4"><span class="status-line status-info">No edges observed yet.</span></td></tr>`;
+
+  const count = getElement<HTMLSpanElement>("debug-trace-count");
+  count.textContent = String(state.entries.length);
+}
+
+// Record one local debug event and refresh the debug view when visible.
+function emitDebugTrace(
+  state: DebugState,
+  channel: DebugChannel,
+  direction: DebugDirection,
+  from: string,
+  to: string,
+  event: string,
+  details: Record<string, unknown>
+): void {
+  appendDebugTrace(state, {
+    timestamp: nowIso(),
+    channel,
+    direction,
+    from,
+    to,
+    event,
+    details
+  });
+  const container = getElement<HTMLDivElement>("debug-view");
+  if (!container.hidden) {
+    renderDebugView(state);
+  }
+}
+
+// Ingest API-level trace entries emitted by the shared HTTP/SSE wrapper.
+function ingestApiTrace(state: DebugState, entry: ApiTraceEntry): void {
+  appendDebugTrace(state, {
+    timestamp: entry.timestamp,
+    channel: entry.channel,
+    direction: entry.direction,
+    from: entry.from,
+    to: entry.to,
+    event: entry.event,
+    details: entry.details
+  });
+  const container = getElement<HTMLDivElement>("debug-view");
+  if (!container.hidden) {
+    renderDebugView(state);
+  }
+}
+
 function setSectionStatus(sectionId: SectionId, ok: boolean | null, message: string): void {
   const status = getElement<HTMLParagraphElement>(`${sectionId}-status`);
   status.textContent = message;
@@ -62,6 +457,18 @@ function setSectionStatus(sectionId: SectionId, ok: boolean | null, message: str
 function setSectionJson(sectionId: SectionId, value: unknown): void {
   const pre = getElement<HTMLPreElement>(`${sectionId}-json`);
   pre.textContent = typeof value === "string" ? value : formatJson(value);
+}
+
+function jsonDetails(sectionId: SectionId): string {
+  return `
+    <details class="json-details">
+      <summary>Show JSON</summary>
+      <div class="json-actions">
+        <button class="secondary" type="button" data-copy-json="${sectionId}">Copy JSON</button>
+      </div>
+      <pre id="${sectionId}-json" class="json-output"></pre>
+    </details>
+  `;
 }
 
 function reportEnvelope(sectionId: SectionId, payload: ApiEnvelope<unknown>, action: string = sectionId): void {
@@ -96,6 +503,87 @@ function reportRuntimeError(sectionId: SectionId, label: string, error: unknown)
     label,
     error: String(error)
   });
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (!value) {
+    throw new Error("Nothing to copy");
+  }
+  if (!navigator.clipboard || !navigator.clipboard.writeText) {
+    throw new Error("Clipboard API is unavailable");
+  }
+  await navigator.clipboard.writeText(value);
+}
+
+function wireJsonCopyButtons(root: ParentNode): void {
+  const buttons = root.querySelectorAll<HTMLButtonElement>("button[data-copy-json]");
+  buttons.forEach((button) => {
+    button.addEventListener("click", async () => {
+      const sectionId = button.dataset.copyJson as SectionId | undefined;
+      if (!sectionId) {
+        return;
+      }
+      const pre = getElement<HTMLPreElement>(`${sectionId}-json`);
+      const payload = pre.textContent ?? "";
+      try {
+        await copyTextToClipboard(payload);
+        setSectionStatus(sectionId, true, "OK: JSON copied to clipboard");
+        UI_LOGGER.info("json_copied", "Copied section JSON to clipboard", { section: sectionId });
+      } catch (error) {
+        setSectionStatus(sectionId, false, "Failed: Unable to copy JSON");
+        UI_LOGGER.warn("json_copy_failed", "Failed to copy section JSON", {
+          section: sectionId,
+          error: String(error)
+        });
+      }
+    });
+  });
+}
+
+async function killCurrentBackend(state: DebugState): Promise<BackendKillResult> {
+  emitDebugTrace(
+    state,
+    "tauri",
+    "send",
+    "frontend.ui",
+    "desktop.tauri",
+    "stop_backend_current",
+    {}
+  );
+  const result = await invoke<BackendKillResult>("stop_backend_current");
+  emitDebugTrace(
+    state,
+    "tauri",
+    "receive",
+    "desktop.tauri",
+    "frontend.ui",
+    "stop_backend_current_result",
+    { killed_pids: result.killed_pids }
+  );
+  return result;
+}
+
+async function killAllBackends(state: DebugState): Promise<BackendKillResult> {
+  emitDebugTrace(
+    state,
+    "tauri",
+    "send",
+    "frontend.ui",
+    "desktop.tauri",
+    "stop_backend_all",
+    {}
+  );
+  const result = await invoke<BackendKillResult>("stop_backend_all");
+  emitDebugTrace(
+    state,
+    "tauri",
+    "receive",
+    "desktop.tauri",
+    "frontend.ui",
+    "stop_backend_all_result",
+    { killed_pids: result.killed_pids }
+  );
+  return result;
 }
 
 // This function centralizes button busy-state visuals so hover/press/loading
@@ -268,6 +756,37 @@ function buildLlmPayloadFromForm(): LlmConfigPayload {
   };
 }
 
+function applyAdvancedToForm(settings: AdvancedSettingsPayload): void {
+  getElement<HTMLTextAreaElement>("advanced-prompt-template").value = settings.prompt_template;
+  getElement<HTMLTextAreaElement>("advanced-repair-template").value = settings.repair_prompt_template;
+  getElement<HTMLInputElement>("advanced-max-items").value = String(settings.max_items_in_prompt);
+  getElement<HTMLInputElement>("advanced-json-schema").checked = settings.use_json_schema_response;
+  getElement<HTMLInputElement>("advanced-skip-repair").checked = settings.skip_repair;
+  getElement<HTMLInputElement>("advanced-force-fallback").checked = settings.force_fallback;
+  getElement<HTMLInputElement>("advanced-capture-exchange").checked =
+    settings.capture_raw_provider_exchange;
+  const promptOrigin = settings.is_default_prompt_template ? "default" : "custom";
+  const repairOrigin = settings.is_default_repair_prompt_template ? "default" : "custom";
+  getElement<HTMLParagraphElement>("advanced-template-origin").textContent =
+    `Prompt source: ${promptOrigin}. Repair prompt source: ${repairOrigin}.`;
+}
+
+function buildAdvancedPayloadFromForm(): AdvancedSettingsPayload {
+  const maxItems = Number.parseInt(getElement<HTMLInputElement>("advanced-max-items").value, 10);
+  if (Number.isNaN(maxItems) || maxItems <= 0) {
+    throw new Error("max_items_in_prompt must be a positive integer");
+  }
+  return {
+    prompt_template: getElement<HTMLTextAreaElement>("advanced-prompt-template").value,
+    repair_prompt_template: getElement<HTMLTextAreaElement>("advanced-repair-template").value,
+    max_items_in_prompt: maxItems,
+    use_json_schema_response: getElement<HTMLInputElement>("advanced-json-schema").checked,
+    skip_repair: getElement<HTMLInputElement>("advanced-skip-repair").checked,
+    force_fallback: getElement<HTMLInputElement>("advanced-force-fallback").checked,
+    capture_raw_provider_exchange: getElement<HTMLInputElement>("advanced-capture-exchange").checked
+  };
+}
+
 type SourceView = SourceRecord & {
   loaded: boolean;
 };
@@ -294,7 +813,7 @@ function sourceRows(sources: SourceView[]): string {
     .join("");
 }
 
-async function renderSources(api: InfostreamApi): Promise<void> {
+async function renderSources(api: InfostreamApi, debugState: DebugState): Promise<void> {
   UI_LOGGER.debug("sources_refresh_started", "Refreshing source table");
   const installedPayload = await api.getInstalledSources();
   if (!installedPayload.ok || !installedPayload.data) {
@@ -308,6 +827,7 @@ async function renderSources(api: InfostreamApi): Promise<void> {
     return;
   }
 
+  // Merge installed metadata with enabled state so the table reflects both views.
   const enabledUids = new Set(enabledPayload.data.sources.map((source) => source.uid));
   const merged = installedPayload.data.sources.map((source) => ({
     ...source,
@@ -328,11 +848,287 @@ async function renderSources(api: InfostreamApi): Promise<void> {
     enabled_count: enabledUids.size,
     rendered_count: filtered.length
   });
+  emitDebugTrace(debugState, "http", "receive", "backend.sources", "frontend.ui", "sources_snapshot_loaded", {
+    installed_count: merged.length,
+    enabled_count: enabledUids.size,
+    rendered_count: filtered.length
+  });
   setSectionJson("sources", {
     installed: installedPayload,
     enabled: enabledPayload,
     rendered_count: filtered.length
   });
+}
+
+function renderDigestAccordion(outputJson: Record<string, unknown>): void {
+  const container = getElement<HTMLDivElement>("digest-accordion");
+  const topLevelEntries = Object.entries(outputJson).filter(([key]) => key !== "version");
+  if (topLevelEntries.length === 0) {
+    container.innerHTML = "<p class=\"status-line status-info\">No digest content available.</p>";
+    return;
+  }
+
+  // Render each top-level key as an accordion section with custom handling for interests.
+  const html = topLevelEntries
+    .map(([key, value]) => {
+      if (key === "interests" && value && typeof value === "object" && !Array.isArray(value)) {
+        return digestAccordionBlock("Interests", renderInterestsAccordion(value as Record<string, unknown>));
+      }
+      return digestAccordionBlock(key, renderDigestValue(value));
+    })
+    .join("");
+  container.innerHTML = html;
+}
+
+function digestAccordionBlock(title: string, contentHtml: string): string {
+  return `
+    <details class="digest-accordion-item">
+      <summary>${escapeHtml(title)}</summary>
+      <div class="digest-accordion-content">${contentHtml}</div>
+    </details>
+  `;
+}
+
+function renderInterestsAccordion(interests: Record<string, unknown>): string {
+  const entries = Object.entries(interests);
+  if (entries.length === 0) {
+    return "<p>No interests returned.</p>";
+  }
+  return entries
+    .map(([interestName, bullets]) => {
+      const bulletArray = Array.isArray(bullets) ? bullets : [];
+      // Normalize bullet variants and keep confidence/source refs visible for review.
+      const bulletHtml = bulletArray
+        .map((bullet) => {
+          if (!bullet || typeof bullet !== "object") {
+            return `<li><pre>${escapeHtml(formatJson(bullet))}</pre></li>`;
+          }
+          const mapped = bullet as Record<string, unknown>;
+          const text = String(mapped.text ?? "");
+          const confidence = String(mapped.confidence ?? "unknown");
+          const sourceRefs = Array.isArray(mapped.source_refs) ? mapped.source_refs : [];
+          return `
+            <li>
+              <p>${escapeHtml(text)}</p>
+              <p class="digest-confidence">Confidence: <strong>${escapeHtml(confidence)}</strong></p>
+              <p class="digest-refs">Refs: ${escapeHtml(sourceRefs.map((entry) => String(entry)).join(", "))}</p>
+            </li>
+          `;
+        })
+        .join("");
+      return digestAccordionBlock(
+        interestName,
+        `<ul class="digest-interest-list">${bulletHtml || "<li>No bullets</li>"}</ul>`
+      );
+    })
+    .join("");
+}
+
+function renderDigestValue(value: unknown): string {
+  if (typeof value === "string") {
+    return `<p>${escapeHtml(value)}</p>`;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return "<p>[]</p>";
+    }
+    return `<pre>${escapeHtml(formatJson(value))}</pre>`;
+  }
+  if (value && typeof value === "object") {
+    return `<pre>${escapeHtml(formatJson(value))}</pre>`;
+  }
+  return `<p>${escapeHtml(String(value))}</p>`;
+}
+
+function renderRunDebug(run: Record<string, unknown>): void {
+  const container = getElement<HTMLDivElement>("run-debug");
+  const diagnosticsHtml = renderRunDiagnostics(run);
+  const rawValue = run.raw_llm_output;
+  if (typeof rawValue !== "string" || !rawValue.trim()) {
+    container.innerHTML = `
+      ${diagnosticsHtml}
+      <p class="status-line status-info">No raw provider output captured for this run.</p>
+    `;
+    return;
+  }
+
+  // Prefer structured provider exchange view when raw_llm_output is wrapped JSON.
+  const parsed = tryParseJson(rawValue);
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    "provider_exchange" in parsed &&
+    "raw_output" in parsed
+  ) {
+    const mapped = parsed as Record<string, unknown>;
+    const rawOutput = mapped.raw_output;
+    const providerExchange = mapped.provider_exchange;
+    container.innerHTML = `
+      ${diagnosticsHtml}
+      <details class="digest-accordion-item" open>
+        <summary>Provider exchange (debug)</summary>
+        <div class="digest-accordion-content">
+          <pre>${escapeHtml(formatJson(providerExchange))}</pre>
+        </div>
+      </details>
+      <details class="digest-accordion-item">
+        <summary>Raw model output</summary>
+        <div class="digest-accordion-content">
+          <pre>${escapeHtml(typeof rawOutput === "string" ? rawOutput : formatJson(rawOutput))}</pre>
+        </div>
+      </details>
+    `;
+    return;
+  }
+
+  container.innerHTML = `
+    ${diagnosticsHtml}
+    <details class="digest-accordion-item" open>
+      <summary>Raw model output</summary>
+      <div class="digest-accordion-content">
+        <pre>${escapeHtml(rawValue)}</pre>
+      </div>
+    </details>
+  `;
+}
+
+function parseValidationErrors(errorMessage: unknown): string[] {
+  if (typeof errorMessage !== "string" || !errorMessage.trim()) {
+    return [];
+  }
+  return errorMessage
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function renderRunDiagnostics(run: Record<string, unknown>): string {
+  const runStatus = String(run.status ?? "unknown");
+  const errorCode = typeof run.error_code === "string" ? run.error_code : null;
+  const errorMessage = typeof run.error_message === "string" ? run.error_message : null;
+  const validationErrors = parseValidationErrors(errorMessage);
+  const isFailureContext = errorCode === "LLM_FALLBACK_USED" || runStatus === "failed";
+
+  if (!isFailureContext && !errorCode && !errorMessage) {
+    return `
+      <details class="digest-accordion-item">
+        <summary>Validation/Fallback diagnostics</summary>
+        <div class="digest-accordion-content">
+          <p>No validation or fallback diagnostics for this run.</p>
+        </div>
+      </details>
+    `;
+  }
+
+  const errorRows = validationErrors.length
+    ? `<ul class="run-diagnostics-list">${validationErrors.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>`
+    : "<p>No parsed validation errors available.</p>";
+
+  return `
+    <details class="digest-accordion-item" open>
+      <summary>Validation/Fallback diagnostics</summary>
+      <div class="digest-accordion-content">
+        <p><strong>Status:</strong> ${escapeHtml(runStatus)}</p>
+        <p><strong>Error code:</strong> ${escapeHtml(errorCode ?? "none")}</p>
+        <p><strong>Error message:</strong> ${escapeHtml(errorMessage ?? "none")}</p>
+        ${errorRows}
+      </div>
+    </details>
+  `;
+}
+
+function tryParseJson(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function syncRunDebugFromEnvelope(payload: ApiEnvelope<unknown>): void {
+  if (!payload.ok || !payload.data || typeof payload.data !== "object") {
+    return;
+  }
+  const mapped = payload.data as Record<string, unknown>;
+  const run = mapped.run;
+  if (run && typeof run === "object" && !Array.isArray(run)) {
+    renderRunDebug(run as Record<string, unknown>);
+  }
+}
+
+function traceRunDataFlowFromEnvelope(state: DebugState, payload: ApiEnvelope<unknown>, action: string): void {
+  if (!payload.ok || !payload.data || typeof payload.data !== "object") {
+    return;
+  }
+  // Turn run payload fields into explicit data-flow checkpoints for the debug view.
+  const data = payload.data as Record<string, unknown>;
+  const run = data.run;
+  if (run && typeof run === "object" && !Array.isArray(run)) {
+    const runRecord = run as Record<string, unknown>;
+    emitDebugTrace(state, "http", "receive", "backend.digest", "frontend.ui", "run_snapshot_loaded", {
+      action,
+      run_id: runRecord.run_id,
+      status: runRecord.status,
+      digest_id: runRecord.digest_id
+    });
+    if (typeof runRecord.raw_llm_output === "string" && runRecord.raw_llm_output.length > 0) {
+      let provider = "unknown";
+      const parsed = tryParseJson(runRecord.raw_llm_output);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const mappedExchange = parsed as Record<string, unknown>;
+        const providerExchange = mappedExchange.provider_exchange;
+        if (providerExchange && typeof providerExchange === "object" && !Array.isArray(providerExchange)) {
+          const providerValue = (providerExchange as Record<string, unknown>).provider;
+          if (typeof providerValue === "string" && providerValue.trim()) {
+            provider = providerValue;
+          }
+        }
+      }
+      emitDebugTrace(state, "http", "receive", "backend.llm", "backend.digest", "raw_llm_output_attached", {
+        action,
+        run_id: runRecord.run_id,
+        payload_size: runRecord.raw_llm_output.length,
+        provider
+      });
+    }
+  }
+
+  // Limit per-run source rows to keep the trace readable in large source sets.
+  const sourceResults = Array.isArray(data.sources) ? data.sources.slice(0, 20) : [];
+  for (const result of sourceResults) {
+    if (!result || typeof result !== "object") {
+      continue;
+    }
+    const mapped = result as Record<string, unknown>;
+    const sourceUid = String(mapped.source_uid ?? "unknown");
+    emitDebugTrace(state, "http", "receive", `source.${sourceUid}`, "backend.digest", "source_result_loaded", {
+      action,
+      status: mapped.status,
+      items_ingested_count: mapped.items_ingested_count,
+      duration_ms: mapped.duration_ms
+    });
+  }
+}
+
+function traceDigestEnvelope(state: DebugState, payload: ApiEnvelope<unknown>, action: string): void {
+  if (!payload.ok || !payload.data || typeof payload.data !== "object") {
+    return;
+  }
+  // Expose digest-level milestones so reviewers can see payload movement clearly.
+  const data = payload.data as Record<string, unknown>;
+  if (data.output_json && typeof data.output_json === "object" && !Array.isArray(data.output_json)) {
+    emitDebugTrace(state, "http", "receive", "backend.digest", "frontend.ui", "digest_payload_loaded", {
+      action,
+      keys: Object.keys(data.output_json as Record<string, unknown>)
+    });
+  }
+  if (Array.isArray(data.digests)) {
+    emitDebugTrace(state, "http", "receive", "backend.digest", "frontend.ui", "digest_history_loaded", {
+      action,
+      digest_count: data.digests.length
+    });
+  }
 }
 
 function appendEvent(events: RunEvent[], event: RunEvent): void {
@@ -355,13 +1151,40 @@ function appendEvent(events: RunEvent[], event: RunEvent): void {
   setSectionJson("events", { events });
 }
 
-async function pickSourceDirectory(): Promise<string | null> {
+async function pickSourceDirectory(state: DebugState): Promise<string | null> {
+  emitDebugTrace(
+    state,
+    "tauri",
+    "send",
+    "frontend.ui",
+    "desktop.tauri",
+    "pick_source_directory",
+    {}
+  );
   UI_LOGGER.debug("source_picker_open", "Opening source directory picker");
   const pickedPath = await invoke<string | null>("pick_source_directory");
   if (!pickedPath) {
+    emitDebugTrace(
+      state,
+      "tauri",
+      "receive",
+      "desktop.tauri",
+      "frontend.ui",
+      "pick_source_directory_result",
+      { selected_path: null }
+    );
     UI_LOGGER.info("source_picker_cancelled", "Source directory picker cancelled");
     return null;
   }
+  emitDebugTrace(
+    state,
+    "tauri",
+    "receive",
+    "desktop.tauri",
+    "frontend.ui",
+    "pick_source_directory_result",
+    { selected_path: pickedPath }
+  );
   UI_LOGGER.info("source_picker_selected", "Source directory selected", { selected_path: pickedPath });
   return pickedPath;
 }
@@ -374,12 +1197,20 @@ async function bootstrap(): Promise<void> {
       <h1>Infostream Desktop <span id="base-url" class="badge">starting...</span></h1>
       <div class="controls">
         <button id="health-btn">Check health</button>
+        <button class="secondary" id="debug-open">Open Debug View</button>
       </div>
       <p id="health-status" class="status-line status-info">Waiting for action</p>
-      <details class="json-details">
-        <summary>Show JSON</summary>
-        <pre id="health-json" class="json-output"></pre>
-      </details>
+      ${jsonDetails("health")}
+    </section>
+
+    <section class="panel">
+      <h2>Backend Process Control</h2>
+      <div class="controls">
+        <button class="secondary" id="backend-kill-current">Kill current backend</button>
+        <button class="secondary" id="backend-kill-all">Kill all Infostream backends</button>
+      </div>
+      <p id="backend-status" class="status-line status-info">Waiting for action</p>
+      ${jsonDetails("backend")}
     </section>
 
     <section class="panel">
@@ -408,10 +1239,7 @@ async function bootstrap(): Promise<void> {
         <tbody id="sources-tbody"></tbody>
       </table>
       <p id="sources-status" class="status-line status-info">Waiting for action</p>
-      <details class="json-details">
-        <summary>Show JSON</summary>
-        <pre id="sources-json" class="json-output"></pre>
-      </details>
+      ${jsonDetails("sources")}
     </section>
 
     <section class="grid">
@@ -423,10 +1251,7 @@ async function bootstrap(): Promise<void> {
           <button id="interests-save">Save</button>
         </div>
         <p id="interests-status" class="status-line status-info">Waiting for action</p>
-        <details class="json-details">
-          <summary>Show JSON</summary>
-          <pre id="interests-json" class="json-output"></pre>
-        </details>
+        ${jsonDetails("interests")}
       </div>
 
       <div class="panel">
@@ -476,10 +1301,44 @@ async function bootstrap(): Promise<void> {
           <button id="llm-save">Save</button>
         </div>
         <p id="llm-status" class="status-line status-info">Waiting for action</p>
-        <details class="json-details">
-          <summary>Show JSON</summary>
-          <pre id="llm-json" class="json-output"></pre>
-        </details>
+        ${jsonDetails("llm")}
+      </div>
+
+      <div class="panel">
+        <h2>Advanced Options</h2>
+        <div class="field-grid">
+          <label>Prompt template (supports {interests_text} and {items_json})
+            <textarea id="advanced-prompt-template" placeholder="Optional full prompt override"></textarea>
+          </label>
+          <label>Repair prompt template (supports {base_prompt}, {invalid_output}, {errors})
+            <textarea id="advanced-repair-template" placeholder="Optional full repair prompt override"></textarea>
+          </label>
+          <label>Max items in prompt
+            <input id="advanced-max-items" type="number" min="1" step="1" value="50" />
+          </label>
+          <label class="checkbox-inline">
+            <input id="advanced-json-schema" type="checkbox" checked /> Use OpenAI JSON schema response format
+          </label>
+          <label class="checkbox-inline">
+            <input id="advanced-skip-repair" type="checkbox" /> Skip repair attempt
+          </label>
+          <label class="checkbox-inline">
+            <input id="advanced-force-fallback" type="checkbox" /> Force fallback digest
+          </label>
+          <label class="checkbox-inline">
+            <input id="advanced-capture-exchange" type="checkbox" /> Capture raw provider exchange in run output
+          </label>
+        </div>
+        <div class="controls">
+          <button id="advanced-load">Load</button>
+          <button id="advanced-save">Save</button>
+          <button class="secondary" id="advanced-reset">Reset to Default Settings</button>
+        </div>
+        <p id="advanced-template-origin" class="status-line status-info">
+          Prompt source: unknown. Repair prompt source: unknown.
+        </p>
+        <p id="advanced-status" class="status-line status-info">Waiting for action</p>
+        ${jsonDetails("advanced")}
       </div>
     </section>
 
@@ -501,10 +1360,7 @@ async function bootstrap(): Promise<void> {
           <button id="schedule-save">Save schedule</button>
         </div>
         <p id="schedule-status" class="status-line status-info">Waiting for action</p>
-        <details class="json-details">
-          <summary>Show JSON</summary>
-          <pre id="schedule-json" class="json-output"></pre>
-        </details>
+        ${jsonDetails("schedule")}
       </div>
 
       <div class="panel">
@@ -518,11 +1374,9 @@ async function bootstrap(): Promise<void> {
           <input id="run-id" placeholder="run_id" />
           <button class="secondary" id="run-get">Load run by ID</button>
         </div>
+        <div id="run-debug" class="digest-accordion"></div>
         <p id="runs-status" class="status-line status-info">Waiting for action</p>
-        <details class="json-details">
-          <summary>Show JSON</summary>
-          <pre id="runs-json" class="json-output"></pre>
-        </details>
+        ${jsonDetails("runs")}
       </div>
     </section>
 
@@ -533,11 +1387,9 @@ async function bootstrap(): Promise<void> {
           <button id="digest-current">Current digest</button>
           <button class="secondary" id="digest-history">Digest history</button>
         </div>
+        <div id="digest-accordion" class="digest-accordion"></div>
         <p id="digest-status" class="status-line status-info">Waiting for action</p>
-        <details class="json-details">
-          <summary>Show JSON</summary>
-          <pre id="digest-json" class="json-output"></pre>
-        </details>
+        ${jsonDetails("digest")}
       </div>
 
       <div class="panel">
@@ -547,10 +1399,7 @@ async function bootstrap(): Promise<void> {
           <button id="items-fetch">Fetch by refs</button>
         </div>
         <p id="items-status" class="status-line status-info">Waiting for action</p>
-        <details class="json-details">
-          <summary>Show JSON</summary>
-          <pre id="items-json" class="json-output"></pre>
-        </details>
+        ${jsonDetails("items")}
       </div>
     </section>
 
@@ -558,16 +1407,124 @@ async function bootstrap(): Promise<void> {
       <h2>Live Events (SSE)</h2>
       <p id="events-status" class="status-line status-info">Connecting...</p>
       <ul id="events-list" class="events-list"></ul>
+      ${jsonDetails("events")}
+    </section>
+
+    <section id="debug-view" class="panel debug-view" hidden>
+      <div class="debug-header">
+        <h2>Debug View</h2>
+        <div class="controls">
+          <button class="secondary" id="debug-clear">Clear Trace</button>
+          <button class="secondary" id="debug-copy">Copy Trace JSON</button>
+          <button id="debug-close">Close Debug View</button>
+        </div>
+      </div>
+      <p class="status-line status-info">
+        Data-flow diagram and live communication trace. Trace count: <strong id="debug-trace-count">0</strong>
+      </p>
+      <div id="debug-flowchart" class="debug-flowchart"></div>
       <details class="json-details">
-        <summary>Show JSON</summary>
-        <pre id="events-json" class="json-output"></pre>
+        <summary>Show text pipeline summary</summary>
+        <pre class="debug-diagram" id="debug-diagram"></pre>
       </details>
+      <h3>Latest per Edge</h3>
+      <table class="table debug-table">
+        <thead>
+          <tr>
+            <th>Edge</th>
+            <th>Last Event</th>
+            <th>Last Timestamp</th>
+            <th>Last Payload</th>
+          </tr>
+        </thead>
+        <tbody id="debug-edge-body"></tbody>
+      </table>
+      <h3>Live Trace</h3>
+      <table class="table debug-table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Channel</th>
+            <th>Direction</th>
+            <th>From</th>
+            <th>To</th>
+            <th>Event</th>
+            <th>Payload</th>
+          </tr>
+        </thead>
+        <tbody id="debug-trace-body"></tbody>
+      </table>
     </section>
   `;
 
   wireVisualFeedback(app);
+  wireJsonCopyButtons(app);
+  const debugState: DebugState = {
+    entries: [],
+    activeEdgeIds: new Set<string>(),
+    activeNodeIds: new Set<string>()
+  };
+  getElement<HTMLPreElement>("debug-diagram").textContent = DATA_FLOW_DIAGRAM;
+  renderDebugView(debugState);
+  setApiTraceObserver((entry) => ingestApiTrace(debugState, entry));
 
+  getElement<HTMLButtonElement>("debug-open").addEventListener("click", () => {
+    const container = getElement<HTMLDivElement>("debug-view");
+    container.hidden = false;
+    renderDebugView(debugState);
+    emitDebugTrace(debugState, "ui", "send", "frontend.user", "frontend.debug_view", "debug_view_opened", {});
+  });
+
+  getElement<HTMLButtonElement>("debug-close").addEventListener("click", () => {
+    const container = getElement<HTMLDivElement>("debug-view");
+    container.hidden = true;
+    emitDebugTrace(debugState, "ui", "send", "frontend.user", "frontend.debug_view", "debug_view_closed", {});
+  });
+
+  getElement<HTMLButtonElement>("debug-clear").addEventListener("click", () => {
+    debugState.entries = [];
+    debugState.activeEdgeIds.clear();
+    debugState.activeNodeIds.clear();
+    renderDebugView(debugState);
+  });
+
+  getElement<HTMLButtonElement>("debug-copy").addEventListener("click", async () => {
+    try {
+      const payload = formatJson(debugState.entries);
+      await copyTextToClipboard(payload);
+      emitDebugTrace(debugState, "ui", "send", "frontend.user", "frontend.debug_view", "debug_trace_copied", {
+        count: debugState.entries.length
+      });
+      renderDebugView(debugState);
+    } catch (error) {
+      emitDebugTrace(debugState, "ui", "receive", "frontend.debug_view", "frontend.user", "debug_trace_copy_failed", {
+        error: String(error)
+      });
+    }
+  });
+
+  getElement<HTMLDivElement>("run-debug").innerHTML =
+    "<p class=\"status-line status-info\">Load a run to inspect raw provider output.</p>";
+
+  emitDebugTrace(
+    debugState,
+    "tauri",
+    "send",
+    "frontend.ui",
+    "desktop.tauri",
+    "bootstrap_backend",
+    {}
+  );
   const baseUrl = await invoke<string>("bootstrap_backend");
+  emitDebugTrace(
+    debugState,
+    "tauri",
+    "receive",
+    "desktop.tauri",
+    "frontend.ui",
+    "bootstrap_backend_result",
+    { base_url: baseUrl }
+  );
   UI_LOGGER.info("backend_bootstrapped", "Backend bootstrap completed", { base_url: baseUrl });
   getElement<HTMLSpanElement>("base-url").textContent = baseUrl;
 
@@ -579,7 +1536,7 @@ async function bootstrap(): Promise<void> {
   getElement<HTMLButtonElement>("source-pick").addEventListener("click", async (event) => {
     const button = event.currentTarget as HTMLButtonElement;
     await withButtonBusy(button, async () => {
-      const pickedPath = await pickSourceDirectory();
+      const pickedPath = await pickSourceDirectory(debugState);
       if (!pickedPath) {
         setSectionStatus("sources", null, "No directory selected");
         UI_LOGGER.debug("source_pick_no_selection", "No source directory was selected");
@@ -605,7 +1562,7 @@ async function bootstrap(): Promise<void> {
       const payload = await api.installSource(path);
       reportEnvelope("sources", payload as ApiEnvelope<unknown>, "source_install");
       if (payload.ok) {
-        await renderSources(api);
+        await renderSources(api, debugState);
       }
     });
   });
@@ -613,13 +1570,13 @@ async function bootstrap(): Promise<void> {
   getElement<HTMLButtonElement>("source-refresh").addEventListener("click", async (event) => {
     const button = event.currentTarget as HTMLButtonElement;
     await withButtonBusy(button, async () => {
-      await renderSources(api);
+      await renderSources(api, debugState);
     });
   });
 
   getElement<HTMLInputElement>("sources-show-enabled-only").addEventListener("change", async () => {
     try {
-      await renderSources(api);
+      await renderSources(api, debugState);
     } catch (error) {
       reportRuntimeError("sources", "Unable to refresh source table", error);
     }
@@ -649,7 +1606,7 @@ async function bootstrap(): Promise<void> {
 
       reportEnvelope("sources", payload, `source_${action}`);
       if (payload.ok) {
-        await renderSources(api);
+        await renderSources(api, debugState);
       }
     });
   });
@@ -660,6 +1617,39 @@ async function bootstrap(): Promise<void> {
     await withButtonBusy(button, async () => {
       const payload = await api.getHealth();
       reportEnvelope("health", payload as ApiEnvelope<unknown>, "health_check");
+    });
+  });
+
+  // Backend process control actions.
+  getElement<HTMLButtonElement>("backend-kill-current").addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    await withButtonBusy(button, async () => {
+      try {
+        const result = await killCurrentBackend(debugState);
+        setSectionStatus("backend", true, "OK: Requested current backend termination");
+        setSectionJson("backend", result);
+        UI_LOGGER.info("backend_kill_current_succeeded", "Requested current backend termination", {
+          killed_pids: result.killed_pids
+        });
+      } catch (error) {
+        reportRuntimeError("backend", "Unable to kill current backend", error);
+      }
+    });
+  });
+
+  getElement<HTMLButtonElement>("backend-kill-all").addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    await withButtonBusy(button, async () => {
+      try {
+        const result = await killAllBackends(debugState);
+        setSectionStatus("backend", true, "OK: Requested all backend termination");
+        setSectionJson("backend", result);
+        UI_LOGGER.info("backend_kill_all_succeeded", "Requested all backend termination", {
+          killed_pids: result.killed_pids
+        });
+      } catch (error) {
+        reportRuntimeError("backend", "Unable to kill all backends", error);
+      }
     });
   });
 
@@ -714,6 +1704,45 @@ async function bootstrap(): Promise<void> {
     });
   });
 
+  // Advanced options actions.
+  getElement<HTMLButtonElement>("advanced-load").addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    await withButtonBusy(button, async () => {
+      const payload = await api.getAdvancedSettings();
+      if (payload.ok && payload.data) {
+        applyAdvancedToForm(payload.data);
+      }
+      reportEnvelope("advanced", payload as ApiEnvelope<unknown>, "advanced_load");
+    });
+  });
+
+  getElement<HTMLButtonElement>("advanced-save").addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    await withButtonBusy(button, async () => {
+      try {
+        const payload = buildAdvancedPayloadFromForm();
+        const response = await api.putAdvancedSettings(payload);
+        if (response.ok && response.data) {
+          applyAdvancedToForm(response.data);
+        }
+        reportEnvelope("advanced", response as ApiEnvelope<unknown>, "advanced_save");
+      } catch (error) {
+        reportRuntimeError("advanced", "Invalid advanced options form data", error);
+      }
+    });
+  });
+
+  getElement<HTMLButtonElement>("advanced-reset").addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    await withButtonBusy(button, async () => {
+      const payload = await api.resetAdvancedSettings();
+      if (payload.ok && payload.data) {
+        applyAdvancedToForm(payload.data);
+      }
+      reportEnvelope("advanced", payload as ApiEnvelope<unknown>, "advanced_reset");
+    });
+  });
+
   // Schedule actions.
   getElement<HTMLButtonElement>("schedule-save").addEventListener("click", async (event) => {
     const button = event.currentTarget as HTMLButtonElement;
@@ -738,6 +1767,11 @@ async function bootstrap(): Promise<void> {
       if (payload.ok && payload.data) {
         latestRunId = payload.data.run_id;
         getElement<HTMLInputElement>("run-id").value = payload.data.run_id;
+        emitDebugTrace(debugState, "http", "receive", "backend.digest", "frontend.ui", "run_accepted", {
+          run_id: payload.data.run_id
+        });
+        getElement<HTMLDivElement>("run-debug").innerHTML =
+          "<p class=\"status-line status-info\">Run accepted. Load latest/by-id after completion to view debug output.</p>";
       }
       reportEnvelope("runs", payload as ApiEnvelope<unknown>, "run_now");
     });
@@ -752,6 +1786,8 @@ async function bootstrap(): Promise<void> {
         getElement<HTMLInputElement>("run-id").value = latestRunId;
       }
       reportEnvelope("runs", payload as ApiEnvelope<unknown>, "run_latest");
+      syncRunDebugFromEnvelope(payload as ApiEnvelope<unknown>);
+      traceRunDataFlowFromEnvelope(debugState, payload as ApiEnvelope<unknown>, "run_latest");
     });
   });
 
@@ -766,6 +1802,8 @@ async function bootstrap(): Promise<void> {
       }
       const payload = await api.getRun(runId);
       reportEnvelope("runs", payload as ApiEnvelope<unknown>, "run_get");
+      syncRunDebugFromEnvelope(payload as ApiEnvelope<unknown>);
+      traceRunDataFlowFromEnvelope(debugState, payload as ApiEnvelope<unknown>, "run_get");
     });
   });
 
@@ -789,7 +1827,14 @@ async function bootstrap(): Promise<void> {
     const button = event.currentTarget as HTMLButtonElement;
     await withButtonBusy(button, async () => {
       const payload = await api.getCurrentDigest();
+      if (payload.ok && payload.data && typeof payload.data === "object") {
+        const mapped = payload.data as Record<string, unknown>;
+        if (mapped.output_json && typeof mapped.output_json === "object") {
+          renderDigestAccordion(mapped.output_json as Record<string, unknown>);
+        }
+      }
       reportEnvelope("digest", payload as ApiEnvelope<unknown>, "digest_current");
+      traceDigestEnvelope(debugState, payload as ApiEnvelope<unknown>, "digest_current");
     });
   });
 
@@ -798,6 +1843,7 @@ async function bootstrap(): Promise<void> {
     await withButtonBusy(button, async () => {
       const payload = await api.getDigestHistory();
       reportEnvelope("digest", payload as ApiEnvelope<unknown>, "digest_history");
+      traceDigestEnvelope(debugState, payload as ApiEnvelope<unknown>, "digest_history");
     });
   });
 
@@ -818,7 +1864,7 @@ async function bootstrap(): Promise<void> {
   setSectionStatus("events", null, "Connecting to event stream...");
   const stream = api.openEventsStream(
     (eventPayload) => {
-      setSectionStatus("events", true, "OK: Connected to event stream");
+      setSectionStatus("events", true, "OK: Event received");
       UI_LOGGER.debug("events_stream_message", "Received SSE event", {
         type: eventPayload.type,
         run_id: eventPayload.run_id,
@@ -829,11 +1875,16 @@ async function bootstrap(): Promise<void> {
     () => {
       setSectionStatus("events", false, "Failed: Event stream disconnected, retrying...");
       UI_LOGGER.warn("events_stream_disconnected", "Events stream disconnected");
+    },
+    () => {
+      setSectionStatus("events", true, "OK: Connected to event stream (waiting for events)");
+      UI_LOGGER.info("events_stream_connected", "Events stream connected");
     }
   );
 
   window.addEventListener("beforeunload", () => {
     stream.close();
+    setApiTraceObserver(null);
   });
 
   syncLlmProviderUi("stub_local", false);
@@ -848,7 +1899,32 @@ async function bootstrap(): Promise<void> {
   } else {
     reportEnvelope("llm", initialLlm as ApiEnvelope<unknown>, "llm_initial_load");
   }
-  await renderSources(api);
+
+  const initialInterests = await api.getInterests();
+  if (initialInterests.ok && initialInterests.data) {
+    getElement<HTMLTextAreaElement>("interests-text").value = initialInterests.data.interests;
+    reportEnvelope(
+      "interests",
+      initialInterests as ApiEnvelope<unknown>,
+      "interests_initial_load"
+    );
+  } else {
+    reportEnvelope(
+      "interests",
+      initialInterests as ApiEnvelope<unknown>,
+      "interests_initial_load"
+    );
+  }
+
+  const initialAdvanced = await api.getAdvancedSettings();
+  if (initialAdvanced.ok && initialAdvanced.data) {
+    applyAdvancedToForm(initialAdvanced.data);
+    reportEnvelope("advanced", initialAdvanced as ApiEnvelope<unknown>, "advanced_initial_load");
+  } else {
+    reportEnvelope("advanced", initialAdvanced as ApiEnvelope<unknown>, "advanced_initial_load");
+  }
+
+  await renderSources(api, debugState);
   setSectionStatus("health", true, "OK: Backend bootstrapped");
   setSectionJson("health", { base_url: baseUrl });
   UI_LOGGER.info("bootstrap_completed", "Desktop bootstrap completed");

@@ -1,3 +1,5 @@
+"""CLI entrypoint for starting the Infostream backend daemon."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,11 +12,8 @@ from infostream.core.config import BackendConfig
 from infostream.core.logging import get_logger
 from infostream.main import create_app
 
-# This file is the CLI entry point and implements the ports/CLI entry
-# and argument parsing functions
-
-
 def _find_free_port(host: str) -> int:
+    """Return an ephemeral free port bound on the requested host."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -22,6 +21,7 @@ def _find_free_port(host: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for host/port/home overrides."""
     parser = argparse.ArgumentParser(description="Infostream daemon")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Parse CLI args, create app config, and launch uvicorn."""
     parser = build_parser()
     args = parser.parse_args()
     port = args.port if args.port else _find_free_port(args.host)

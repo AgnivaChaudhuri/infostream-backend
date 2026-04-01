@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
+from infostream.digest.provider import default_prompt_template, default_repair_prompt_template
 
 
 def _wait_for_run(client: TestClient, run_id: str, timeout_seconds: float = 10.0) -> dict[str, Any]:
@@ -98,10 +99,16 @@ def test_fallback_digest_path(client: TestClient, demo_source_path: Path, monkey
 
     ctx = client.app.state.ctx
 
-    def bad_summarize(items: list[Any], interests_text: str, llm: Any) -> str:
+    def bad_summarize(
+        items: list[Any],
+        interests_text: str,
+        llm: Any,
+        advanced: dict[str, Any],
+    ) -> str:
         _ = items
         _ = interests_text
         _ = llm
+        _ = advanced
         return "not-json"
 
     def bad_repair(
@@ -110,12 +117,14 @@ def test_fallback_digest_path(client: TestClient, demo_source_path: Path, monkey
         items: list[Any],
         interests_text: str,
         llm: Any,
+        advanced: dict[str, Any],
     ) -> str:
         _ = invalid_output
         _ = errors
         _ = items
         _ = interests_text
         _ = llm
+        _ = advanced
         return "still-not-json"
 
     monkeypatch.setattr(ctx.digest_service._summarizer, "summarize", bad_summarize)
@@ -131,3 +140,38 @@ def test_fallback_digest_path(client: TestClient, demo_source_path: Path, monkey
 
     digest = client.get("/digest/current").json()["data"]["output_json"]
     assert "fallback" in digest["extraneous"].lower()
+
+
+def test_advanced_settings_effective_defaults_and_reset(client: TestClient) -> None:
+    advanced_get = client.get("/settings/advanced")
+    assert advanced_get.status_code == 200
+    advanced_data = advanced_get.json()["data"]
+    assert advanced_data["is_default_prompt_template"] is True
+    assert advanced_data["is_default_repair_prompt_template"] is True
+    assert advanced_data["prompt_template"] == default_prompt_template()
+    assert advanced_data["repair_prompt_template"] == default_repair_prompt_template()
+
+    update_payload = {
+        "prompt_template": "Custom prompt {items_json}",
+        "repair_prompt_template": "Repair prompt {errors}",
+        "max_items_in_prompt": 20,
+        "use_json_schema_response": False,
+        "skip_repair": False,
+        "force_fallback": False,
+        "capture_raw_provider_exchange": True,
+    }
+    advanced_put = client.put("/settings/advanced", json=update_payload)
+    assert advanced_put.status_code == 200
+    put_data = advanced_put.json()["data"]
+    assert put_data["prompt_template"] == update_payload["prompt_template"]
+    assert put_data["repair_prompt_template"] == update_payload["repair_prompt_template"]
+    assert put_data["is_default_prompt_template"] is False
+    assert put_data["is_default_repair_prompt_template"] is False
+
+    advanced_reset = client.post("/settings/advanced/reset")
+    assert advanced_reset.status_code == 200
+    reset_data = advanced_reset.json()["data"]
+    assert reset_data["is_default_prompt_template"] is True
+    assert reset_data["is_default_repair_prompt_template"] is True
+    assert reset_data["prompt_template"] == default_prompt_template()
+    assert reset_data["repair_prompt_template"] == default_repair_prompt_template()

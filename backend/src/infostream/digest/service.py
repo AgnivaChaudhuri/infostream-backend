@@ -320,7 +320,11 @@ class DigestRunService:
                 digest_id=digest_id,
                 error_code=digest_error[0] if digest_error else None,
                 error_message=digest_error[1] if digest_error else None,
-                raw_llm_output=raw_output if digest_error else None,
+                raw_llm_output=(
+                    raw_output
+                    if (digest_error or settings.advanced.capture_raw_provider_exchange)
+                    else None
+                ),
             )
             await self._publish_event(
                 event_type="run_finished",
@@ -400,37 +404,73 @@ class DigestRunService:
         The run is allowed to succeed when fallback validates. Only fallback
         generation/validation failure escalates into a failed run.
         """
+        advanced = settings.advanced.model_dump()
+        capture_exchange = bool(settings.advanced.capture_raw_provider_exchange)
+        if settings.advanced.force_fallback:
+            self._logger.warning(
+                "digest_fallback_forced",
+                message="advanced settings forced fallback digest generation",
+            )
+            fallback = self._fallback_digest(items, settings)
+            return fallback, "", ("LLM_FALLBACK_USED", "Fallback forced by advanced settings")
+
         self._logger.debug(
             "digest_summarizer_primary_start",
             message="invoking summarizer for primary digest output",
             item_count=len(items),
             llm_unique_id=settings.llm.unique_id,
         )
-        raw_output = self._summarizer.summarize(items, settings.interests, settings.llm)
+        raw_output = self._summarizer.summarize(
+            items,
+            settings.interests,
+            settings.llm,
+            advanced,
+        )
         payload, errors = self._parse_and_validate(raw_output, items)
         if not errors and payload is not None:
             self._logger.debug(
                 "digest_primary_validated", message="primary digest output validated"
             )
-            return payload, raw_output, None
+            return (
+                payload,
+                self._compose_raw_output(raw_output, capture_exchange=capture_exchange),
+                None,
+            )
 
-        # One repair attempt after schema/citation failure.
-        self._logger.warning(
-            "digest_primary_invalid_repairing",
-            message="primary digest output invalid, attempting repair",
-            validation_errors=sanitize_for_log(errors),
-        )
-        repair_raw = self._summarizer.repair(
-            raw_output,
-            errors,
-            items,
-            settings.interests,
-            settings.llm,
-        )
-        repaired_payload, repaired_errors = self._parse_and_validate(repair_raw, items)
-        if not repaired_errors and repaired_payload is not None:
-            self._logger.info("digest_repair_validated", message="digest repair output validated")
-            return repaired_payload, repair_raw, None
+        repaired_errors: list[str] = errors
+        repair_raw = raw_output
+        if settings.advanced.skip_repair:
+            self._logger.warning(
+                "digest_repair_skipped",
+                message="repair attempt skipped by advanced settings",
+                validation_errors=sanitize_for_log(errors),
+            )
+        else:
+            # One repair attempt after schema/citation failure.
+            self._logger.warning(
+                "digest_primary_invalid_repairing",
+                message="primary digest output invalid, attempting repair",
+                validation_errors=sanitize_for_log(errors),
+            )
+            repair_raw = self._summarizer.repair(
+                raw_output,
+                errors,
+                items,
+                settings.interests,
+                settings.llm,
+                advanced,
+            )
+            repaired_payload, repaired_errors = self._parse_and_validate(repair_raw, items)
+            if not repaired_errors and repaired_payload is not None:
+                self._logger.info(
+                    "digest_repair_validated",
+                    message="digest repair output validated",
+                )
+                return (
+                    repaired_payload,
+                    self._compose_raw_output(repair_raw, capture_exchange=capture_exchange),
+                    None,
+                )
 
         # Final fallback path; this must also validate before we accept it.
         fallback = self._fallback_digest(items, settings)
@@ -454,7 +494,11 @@ class DigestRunService:
             message="digest fallback used after model output failures",
             validation_errors=sanitize_for_log(joined_errors),
         )
-        return fallback, raw_output, ("LLM_FALLBACK_USED", joined_errors)
+        return (
+            fallback,
+            self._compose_raw_output(raw_output, capture_exchange=capture_exchange),
+            ("LLM_FALLBACK_USED", joined_errors),
+        )
 
     def _parse_and_validate(
         self,
@@ -492,6 +536,19 @@ class DigestRunService:
             return payload, citation_errors
 
         return payload, []
+
+    def _compose_raw_output(self, raw_output: str, *, capture_exchange: bool) -> str:
+        """Attach provider exchange metadata when advanced debug capture is enabled."""
+        if not capture_exchange:
+            return raw_output
+        exchange = self._summarizer.get_last_exchange()
+        if not exchange:
+            return raw_output
+        payload = {
+            "raw_output": raw_output,
+            "provider_exchange": exchange,
+        }
+        return json.dumps(payload, ensure_ascii=True)
 
     def _fallback_digest(self, items: list[ItemRecord], settings: SettingsRecord) -> dict[str, Any]:
         """Create deterministic fallback content from current-run items."""

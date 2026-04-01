@@ -195,6 +195,18 @@
           "markdownDescription": "Allow invoking native source directory picker command"
         },
         {
+          "description": "Allow terminating all detected Infostream backend processes",
+          "type": "string",
+          "const": "allow-stop-backend-all",
+          "markdownDescription": "Allow terminating all detected Infostream backend processes"
+        },
+        {
+          "description": "Allow terminating the currently active backend process",
+          "type": "string",
+          "const": "allow-stop-backend-current",
+          "markdownDescription": "Allow terminating the currently active backend process"
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

@@ -9,6 +9,16 @@ description = "Allow invoking native source directory picker command"
 commands.allow = ["pick_source_directory"]
 
 [[permission]]
+identifier = "allow-stop-backend-current"
+description = "Allow terminating the currently active backend process"
+commands.allow = ["stop_backend_current"]
+
+[[permission]]
+identifier = "allow-stop-backend-all"
+description = "Allow terminating all detected Infostream backend processes"
+commands.allow = ["stop_backend_all"]
+
+[[permission]]
 identifier = "allow-emit-frontend-log"
 description = "Allow forwarding frontend log payloads to Rust logging sinks"
 commands.allow = ["emit_frontend_log"]

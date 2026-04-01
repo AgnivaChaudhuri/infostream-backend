@@ -14,6 +14,24 @@ export type LlmConfigPayload = {
   config: Record<string, unknown>;
 };
 
+export type AdvancedSettingsPayload = {
+  prompt_template: string;
+  repair_prompt_template: string;
+  max_items_in_prompt: number;
+  use_json_schema_response: boolean;
+  skip_repair: boolean;
+  force_fallback: boolean;
+  capture_raw_provider_exchange: boolean;
+  is_default_prompt_template?: boolean;
+  is_default_repair_prompt_template?: boolean;
+};
+
+export type BackendKillResult = {
+  killed_pids: number[];
+  managed_children_killed: number;
+  lockfile_removed: boolean;
+};
+
 export type SourceRecord = {
   uid: string;
   name: string;

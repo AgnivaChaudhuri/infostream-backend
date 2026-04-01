@@ -1,14 +1,13 @@
+"""Shared API envelope builders used by all route handlers."""
+
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi.responses import JSONResponse
 
-# This file defines the API responses - either success, or failure, and
-# returns the appropriate messages/data.
-
-
 def success(message: str, data: Any | None = None, status_code: int = 200) -> JSONResponse:
+    """Create a standard success envelope with optional `data`."""
     payload: dict[str, Any] = {
         "ok": True,
         "message": message,
@@ -20,6 +19,7 @@ def success(message: str, data: Any | None = None, status_code: int = 200) -> JS
 
 
 def error(message: str, error_code: str, status_code: int) -> JSONResponse:
+    """Create a standard error envelope with explicit error code."""
     return JSONResponse(
         {
             "ok": False,

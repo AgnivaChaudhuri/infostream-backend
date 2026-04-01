@@ -15,8 +15,15 @@ from infostream.api.responses import error, success
 from infostream.core.context import AppContext
 from infostream.core.logging import get_logger
 from infostream.core.validation import parse_rfc3339
+from infostream.digest.provider import default_prompt_template, default_repair_prompt_template
 from infostream.digest.service import DigestBusyError, RunAlreadyFinishedError, RunNotFoundError
-from infostream.models.schemas import InstallSourceRequest, LlmRequest, ScheduleRequest
+from infostream.models.schemas import (
+    AdvancedSettings,
+    AdvancedSettingsRequest,
+    InstallSourceRequest,
+    LlmRequest,
+    ScheduleRequest,
+)
 from infostream.sources.manager import SourceError
 
 # This file implements all the API endpoints
@@ -59,9 +66,22 @@ def _parse_refs_query(refs: str, max_refs: int) -> list[str]:
 
 def _sse_encode(event: dict[str, Any]) -> str:
     """Encode event dict in SSE wire format."""
-    event_type = str(event.get("type", "message"))
     payload = json.dumps(event, ensure_ascii=True)
-    return f"event: {event_type}\ndata: {payload}\n\n"
+    # Keep payload type in body to avoid frontend listener mismatch on custom SSE event names.
+    return f"data: {payload}\n\n"
+
+
+def _advanced_payload(settings: AdvancedSettings) -> dict[str, Any]:
+    """Return advanced settings with effective default templates expanded for UI editing."""
+    prompt_template = settings.prompt_template.strip()
+    repair_prompt_template = settings.repair_prompt_template.strip()
+    return {
+        **settings.model_dump(),
+        "prompt_template": prompt_template or default_prompt_template(),
+        "repair_prompt_template": repair_prompt_template or default_repair_prompt_template(),
+        "is_default_prompt_template": not bool(prompt_template),
+        "is_default_repair_prompt_template": not bool(repair_prompt_template),
+    }
 
 
 @router.get("/health")
@@ -277,6 +297,71 @@ async def llm_put(request: Request, payload: LlmRequest) -> Any:
         mode=payload.mode,
     )
     return success("LLM configuration updated", settings.llm.model_dump())
+
+
+@router.get("/settings/advanced")
+async def advanced_get(request: Request) -> Any:
+    """Load persisted advanced runtime options."""
+    ctx = _ctx(request)
+    try:
+        settings = ctx.state_store.read_settings()
+        return success("Advanced settings loaded", _advanced_payload(settings.advanced))
+    except (ValidationError, OSError, json.JSONDecodeError):
+        LOGGER.exception(
+            "advanced_settings_load_failed",
+            message="failed to load advanced settings",
+        )
+        return error("Advanced settings are invalid", "INTERNAL_ERROR", 500)
+
+
+@router.put("/settings/advanced")
+async def advanced_put(request: Request, payload: AdvancedSettingsRequest) -> Any:
+    """Persist advanced runtime options used by digest/provider logic."""
+    ctx = _ctx(request)
+    try:
+        settings = ctx.state_store.read_settings()
+        settings.advanced.prompt_template = payload.prompt_template
+        settings.advanced.repair_prompt_template = payload.repair_prompt_template
+        settings.advanced.max_items_in_prompt = payload.max_items_in_prompt
+        settings.advanced.use_json_schema_response = payload.use_json_schema_response
+        settings.advanced.skip_repair = payload.skip_repair
+        settings.advanced.force_fallback = payload.force_fallback
+        settings.advanced.capture_raw_provider_exchange = payload.capture_raw_provider_exchange
+        ctx.state_store.write_settings(settings)
+        LOGGER.info(
+            "advanced_settings_updated",
+            message="advanced settings updated",
+            max_items_in_prompt=payload.max_items_in_prompt,
+            use_json_schema_response=payload.use_json_schema_response,
+            skip_repair=payload.skip_repair,
+            force_fallback=payload.force_fallback,
+            capture_raw_provider_exchange=payload.capture_raw_provider_exchange,
+        )
+        return success("Advanced settings updated", _advanced_payload(settings.advanced))
+    except (ValidationError, OSError, json.JSONDecodeError):
+        LOGGER.exception(
+            "advanced_settings_update_failed",
+            message="failed to write advanced settings",
+        )
+        return error("Failed to write advanced settings", "INTERNAL_ERROR", 500)
+
+
+@router.post("/settings/advanced/reset")
+async def advanced_reset(request: Request) -> Any:
+    """Reset advanced runtime options back to backend defaults."""
+    ctx = _ctx(request)
+    try:
+        settings = ctx.state_store.read_settings()
+        settings.advanced = AdvancedSettings()
+        ctx.state_store.write_settings(settings)
+        LOGGER.info("advanced_settings_reset", message="advanced settings reset to defaults")
+        return success("Advanced settings reset", _advanced_payload(settings.advanced))
+    except (ValidationError, OSError, json.JSONDecodeError):
+        LOGGER.exception(
+            "advanced_settings_reset_failed",
+            message="failed to reset advanced settings",
+        )
+        return error("Failed to reset advanced settings", "INTERNAL_ERROR", 500)
 
 
 @router.post("/digest/run")

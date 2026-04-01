@@ -4,6 +4,8 @@
 //! It exposes Tauri commands used by the webview:
 //! - `bootstrap_backend`
 //! - `pick_source_directory`
+//! - `stop_backend_current`
+//! - `stop_backend_all`
 //! - `emit_frontend_log`
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -11,6 +13,7 @@
 use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -52,6 +55,13 @@ struct LogRecord {
     event: String,
     message: String,
     context: Value,
+}
+
+#[derive(Serialize)]
+struct BackendKillResult {
+    killed_pids: Vec<i32>,
+    managed_children_killed: usize,
+    lockfile_removed: bool,
 }
 
 struct RotatingFileWriter {
@@ -369,7 +379,102 @@ fn pick_source_directory(state: tauri::State<'_, BackendState>) -> Option<String
 
 #[tauri::command]
 fn emit_frontend_log(state: tauri::State<'_, BackendState>, payload: FrontendLogPayload) {
+    // Forward sanitized frontend log payloads into Rust log sinks.
     state.logger.log_frontend(payload);
+}
+
+#[tauri::command]
+fn stop_backend_current(state: tauri::State<'_, BackendState>) -> Result<BackendKillResult, String> {
+    state.log_internal(
+        "info",
+        "backend_stop_current_requested",
+        "requested termination of current backend",
+        json!({}),
+    );
+    let system_root = resolve_system_root()?;
+    let lockfile_path = system_root.join("daemon.lock");
+
+    let mut killed_pids = BTreeSet::new();
+    let managed_children_killed = kill_managed_children(&state, &mut killed_pids)?;
+
+    if let Some(lockfile) = read_lockfile(&lockfile_path) {
+        if terminate_pid(lockfile.pid) {
+            killed_pids.insert(lockfile.pid);
+        }
+    }
+
+    let lockfile_removed = if lockfile_path.exists() {
+        fs::remove_file(&lockfile_path).is_ok()
+    } else {
+        false
+    };
+
+    let result = BackendKillResult {
+        killed_pids: killed_pids.into_iter().collect(),
+        managed_children_killed,
+        lockfile_removed,
+    };
+    state.log_internal(
+        "info",
+        "backend_stop_current_completed",
+        "completed current backend stop request",
+        json!({
+            "killed_pids": result.killed_pids,
+            "managed_children_killed": result.managed_children_killed,
+            "lockfile_removed": result.lockfile_removed
+        }),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+fn stop_backend_all(state: tauri::State<'_, BackendState>) -> Result<BackendKillResult, String> {
+    state.log_internal(
+        "info",
+        "backend_stop_all_requested",
+        "requested termination of all backend processes",
+        json!({}),
+    );
+    let system_root = resolve_system_root()?;
+    let lockfile_path = system_root.join("daemon.lock");
+
+    let mut killed_pids = BTreeSet::new();
+    let managed_children_killed = kill_managed_children(&state, &mut killed_pids)?;
+
+    if let Some(lockfile) = read_lockfile(&lockfile_path) {
+        if terminate_pid(lockfile.pid) {
+            killed_pids.insert(lockfile.pid);
+        }
+    }
+
+    for pid in discover_backend_pids() {
+        if terminate_pid(pid) {
+            killed_pids.insert(pid);
+        }
+    }
+
+    let lockfile_removed = if lockfile_path.exists() {
+        fs::remove_file(&lockfile_path).is_ok()
+    } else {
+        false
+    };
+
+    let result = BackendKillResult {
+        killed_pids: killed_pids.into_iter().collect(),
+        managed_children_killed,
+        lockfile_removed,
+    };
+    state.log_internal(
+        "info",
+        "backend_stop_all_completed",
+        "completed stop-all backend request",
+        json!({
+            "killed_pids": result.killed_pids,
+            "managed_children_killed": result.managed_children_killed,
+            "lockfile_removed": result.lockfile_removed
+        }),
+    );
+    Ok(result)
 }
 
 /// Resolve OS-specific app data location used by the backend daemon.
@@ -577,6 +682,120 @@ fn wait_for_lockfile(lockfile_path: &Path) -> Result<String, String> {
     Err("backend did not become healthy after startup".to_string())
 }
 
+/// Terminate backend children that this desktop process directly spawned.
+fn kill_managed_children(
+    state: &tauri::State<'_, BackendState>,
+    killed_pids: &mut BTreeSet<i32>,
+) -> Result<usize, String> {
+    let mut children = state
+        .children
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
+    let mut removed = 0usize;
+    while !children.is_empty() {
+        let child_pid = children[0].id() as i32;
+        let kill_result = children[0].kill();
+        let _ = children[0].wait();
+        if kill_result.is_ok() {
+            killed_pids.insert(child_pid);
+            removed += 1;
+        }
+        children.remove(0);
+    }
+    Ok(removed)
+}
+
+/// Attempt graceful SIGTERM then hard SIGKILL termination for one PID.
+fn terminate_pid(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if !pid_running(pid) {
+        return true;
+    }
+
+    if cfg!(target_family = "unix") {
+        let term_status = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+        if term_status.is_err() {
+            return false;
+        }
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if !pid_running(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        let kill_status = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status();
+        if kill_status.is_err() {
+            return false;
+        }
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if !pid_running(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        return !pid_running(pid);
+    }
+
+    false
+}
+
+/// Discover likely backend daemon PIDs by scanning Linux `/proc` command lines.
+fn discover_backend_pids() -> Vec<i32> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+
+    let mut pids = Vec::new();
+    let current_pid = std::process::id() as i32;
+    let proc_dir = match fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in proc_dir.flatten() {
+        let file_name = entry.file_name();
+        let pid_text = file_name.to_string_lossy();
+        let pid = match pid_text.parse::<i32>() {
+            Ok(pid) => pid,
+            Err(_) => continue,
+        };
+        if pid <= 0 || pid == current_pid {
+            continue;
+        }
+
+        let cmdline_path = entry.path().join("cmdline");
+        let raw_cmdline = match fs::read(cmdline_path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        if raw_cmdline.is_empty() {
+            continue;
+        }
+        let cmdline = String::from_utf8_lossy(&raw_cmdline).replace('\0', " ");
+        if cmdline.contains("infostream-backend")
+            || cmdline.contains("infostream.cli")
+            || cmdline.contains("infostreamd")
+        {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// Normalize incoming level strings to the supported sink levels.
 fn normalize_level(level: &str) -> &'static str {
     match level.to_lowercase().as_str() {
         "debug" => "debug",
@@ -586,14 +805,17 @@ fn normalize_level(level: &str) -> &'static str {
     }
 }
 
+/// Return current UTC timestamp used by frontend log records.
 fn now_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// Build rotated log filename by appending `.N` suffix.
 fn rotated_path(path: &Path, index: usize) -> PathBuf {
     PathBuf::from(format!("{}.{}", path.to_string_lossy(), index))
 }
 
+/// Check whether a context key should be treated as sensitive.
 fn is_sensitive_key(key: &str) -> bool {
     let lowered = key.to_lowercase();
     [
@@ -611,6 +833,7 @@ fn is_sensitive_key(key: &str) -> bool {
     .any(|part| lowered.contains(part))
 }
 
+/// Recursively redact secrets and truncate very large string fields.
 fn sanitize_json(value: Value, key_hint: Option<&str>) -> Value {
     if let Some(key) = key_hint {
         if is_sensitive_key(key) {
@@ -667,6 +890,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             bootstrap_backend,
             pick_source_directory,
+            stop_backend_current,
+            stop_backend_all,
             emit_frontend_log
         ])
         .run(tauri::generate_context!())

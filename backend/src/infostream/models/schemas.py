@@ -26,9 +26,22 @@ class LlmConfig(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class AdvancedSettings(BaseModel):
+    """Prototype tuning knobs for provider prompting and run behavior."""
+
+    prompt_template: str = ""
+    repair_prompt_template: str = ""
+    max_items_in_prompt: int = Field(default=50, ge=1, le=5000)
+    use_json_schema_response: bool = True
+    skip_repair: bool = False
+    force_fallback: bool = False
+    capture_raw_provider_exchange: bool = False
+
+
 class SettingsRecord(BaseModel):
     interests: str = ""
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    advanced: AdvancedSettings = Field(default_factory=AdvancedSettings)
     schedule: str = "9999-12-31T23:59:59Z"
     run_every: bool = False
     spacing: int = 21600
@@ -138,6 +151,16 @@ class LlmRequest(BaseModel):
     mode: Literal["local", "cloud"]
     unique_id: str
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdvancedSettingsRequest(BaseModel):
+    prompt_template: str = ""
+    repair_prompt_template: str = ""
+    max_items_in_prompt: int = Field(default=50, ge=1, le=5000)
+    use_json_schema_response: bool = True
+    skip_repair: bool = False
+    force_fallback: bool = False
+    capture_raw_provider_exchange: bool = False
 
 
 class InstallSourceRequest(BaseModel):
