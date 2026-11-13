@@ -1,6 +1,12 @@
 # Infostream v1 Monorepo
 
-Infostream is a personal intelligence engine with:
+THE PROTOTYPE NEWS AGGREGATOR PLATFORM WITH LOCAL AI CAPABILITY AND EXTENSIBILITY
+
+Infostream is a personal intelligence engine platform. The base app provides a place for extensions to run, much like Chrome. Extensions are called "sources" and are the source of info, which Infostream aggregates and feeds into an LLM of your choice. You have the option of using OpenAI-capable models, ChatGPT, Claude, or your own local LLM to ensure data never goes to a third party. Additionally, the backend daemon runs continuously and will give you a daily digest on a schedule, of relevant info related to your interests.
+
+NOTE: This is currently a prototype and is mostly a proof of concept.
+
+Its features include:
 
 - Python daemon backend (`FastAPI`)
 - Tauri desktop frontend (Vanilla TypeScript + Vite)
