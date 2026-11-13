@@ -28,6 +28,33 @@ from infostream.sources.manager import SourceError
 
 # This file implements all the API endpoints
 
+# List all API endpoints, line-by-line, short <20 word description
+#BEGIN
+# GET /health: health check
+# GET /sources/installed: return list of installed sources
+# GET /sources/enabled: return list of enabled sources
+# POST /sources/{source_uid}/enable: enable one installed source
+# POST /sources/{source_uid}/disable: disable one enabled source
+# POST /sources/install: install a source package from path
+# DELETE /sources/{source_uid}: uninstall a source package
+# GET /interests: return current interests text
+# PUT /interests: update current interests text
+# GET /llm/current: return current llm configuration
+# PUT /llm/current: update current llm configuration
+# GET /settings/advanced: return advanced runtime settings
+# PUT /settings/advanced: update advanced runtime settings
+# POST /settings/advanced/reset: reset advanced settings to defaults
+# POST /digest/run: launch a digest run
+# PUT /digest/schedule: update digest schedule settings
+# GET /digest/current: return latest digest payload
+# GET /digest/history: return digest history list
+# GET /runs/latest: return latest run with source results
+# GET /runs/{run_id}: return one run with source results
+# POST /runs/{run_id}/cancel: request cancellation of one run
+# GET /items: resolve item refs to metadata
+# GET /events/stream: stream run lifecycle events over sse
+#END
+
 router = APIRouter()  # The standard API router used in FastAPI
 LOGGER = get_logger("api.routes")
 

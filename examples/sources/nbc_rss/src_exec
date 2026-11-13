@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""NBC News RSS source executable for Infostream.
+
+Role in system:
+- Fetch the NBC News RSS feed and map entries into Infostream source items.
+- Persist current-run output as src_output.json with a next_cursor for incremental runs.
+
+Called by:
+- Infostream backend source runtime, which executes src_exec per digest run.
+
+Calls into / depends on:
+- httpx for HTTP feed retrieval.
+- feedparser for RSS/Atom parsing.
+- python-dateutil for robust timestamp parsing.
+- Local filesystem for src_output.json and src_media/.
+
+Notes:
+- The cursor format is source-owned JSON encoded as a string:
+  {"latest_published_at":"RFC3339","seen_external_ids":[...]}.
+- This source is text-focused and does not currently emit media files.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from html import unescape
+from pathlib import Path
+from typing import Any
+
+import feedparser
+import httpx
+from dateutil import parser as date_parser
+
+FEED_URL = "https://feeds.nbcnews.com/nbcnews/public/news"
+HTTP_TIMEOUT_SECONDS = 20.0
+USER_AGENT = "Infostream-NBC-RSS-Source/1.0 (+https://infostream.local)"
+
+
+@dataclass
+class CursorState:
+    """Parsed cursor state used to fetch only unseen entries."""
+
+    latest_published_at: datetime | None
+    seen_external_ids: set[str]
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse source CLI arguments expected by the Infostream runtime.
+
+    Inputs:
+    - Optional --cursor string from backend source_state.next_cursor.
+
+    Outputs:
+    - argparse namespace containing .cursor.
+
+    Called by:
+    - main() entrypoint before feed processing.
+    """
+    parser = argparse.ArgumentParser(description="NBC News RSS source executable")
+    parser.add_argument("--cursor", type=str, default=None)
+    return parser.parse_args()
+
+
+def parse_cursor(cursor_raw: str | None) -> CursorState:
+    """Deserialize source-owned cursor JSON into typed state.
+
+    Inputs:
+    - cursor_raw: string set by previous src_output.json next_cursor.
+
+    Outputs:
+    - CursorState with latest timestamp and IDs at that timestamp.
+
+    Error behavior:
+    - Invalid cursor falls back to an empty state to avoid hard failure.
+
+    Called by:
+    - main() before filtering entries.
+    """
+    if not cursor_raw:
+        return CursorState(latest_published_at=None, seen_external_ids=set())
+
+    try:
+        payload = json.loads(cursor_raw)
+    except json.JSONDecodeError:
+        return CursorState(latest_published_at=None, seen_external_ids=set())
+
+    latest_raw = payload.get("latest_published_at")
+    latest_dt: datetime | None = None
+    if isinstance(latest_raw, str) and latest_raw:
+        try:
+            latest_dt = to_utc(date_parser.parse(latest_raw))
+        except (ValueError, TypeError):
+            latest_dt = None
+
+    ids_raw = payload.get("seen_external_ids", [])
+    seen_ids = {value for value in ids_raw if isinstance(value, str) and value}
+    return CursorState(latest_published_at=latest_dt, seen_external_ids=seen_ids)
+
+
+def to_rfc3339(value: datetime) -> str:
+    """Render a datetime as RFC3339 UTC timestamp without microseconds."""
+    return to_utc(value).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def to_utc(value: datetime) -> datetime:
+    """Normalize datetime to timezone-aware UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def parse_entry_timestamp(entry: dict[str, Any]) -> datetime | None:
+    """Extract and parse publication timestamp from an RSS entry.
+
+    Inputs:
+    - Parsed feed entry dictionary from feedparser.
+
+    Outputs:
+    - UTC datetime when parse succeeds, otherwise None.
+
+    Called by:
+    - build_items() for filtering and created_at field generation.
+    """
+    for key in ("published", "updated", "created"):
+        raw = entry.get(key)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                return to_utc(date_parser.parse(raw))
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def normalize_text(value: str | None) -> str | None:
+    """Convert common RSS HTML snippets into plain text."""
+    if not value:
+        return None
+    no_tags = re.sub(r"<[^>]+>", " ", value)
+    squashed = re.sub(r"\s+", " ", unescape(no_tags)).strip()
+    return squashed or None
+
+
+def compute_external_id(entry: dict[str, Any]) -> str:
+    """Build a stable per-entry identifier used for item deduplication.
+
+    Preference order:
+    1. id/guid
+    2. link URL
+    3. title + published tuple fallback
+    """
+    candidates = [
+        entry.get("id"),
+        entry.get("guid"),
+        entry.get("link"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    title = str(entry.get("title", "")).strip()
+    published = str(entry.get("published", "")).strip()
+    return f"fallback:{title}:{published}"
+
+
+def should_include(entry_dt: datetime | None, external_id: str, cursor: CursorState) -> bool:
+    """Decide whether an entry is new relative to the provided cursor.
+
+    If a cursor exists and an entry has no timestamp, it is skipped to avoid
+    repeatedly re-ingesting undated items on every run.
+    """
+    if cursor.latest_published_at is None:
+        return True
+    if entry_dt is None:
+        return False
+    if entry_dt > cursor.latest_published_at:
+        return True
+    if entry_dt < cursor.latest_published_at:
+        return False
+    return external_id not in cursor.seen_external_ids
+
+
+def build_items(
+    entries: list[dict[str, Any]],
+    cursor: CursorState,
+) -> tuple[list[dict[str, Any]], CursorState]:
+    """Transform feed entries into source items and compute next cursor.
+
+    Inputs:
+    - entries: feedparser entries list.
+    - cursor: previous-run cursor state.
+
+    Outputs:
+    - items list for src_output.json.
+    - next cursor state tracking the latest observed publication timestamp.
+
+    Called by:
+    - main() after feed fetch/parse.
+    """
+    items: list[dict[str, Any]] = []
+    next_latest = cursor.latest_published_at
+    next_ids = set(cursor.seen_external_ids)
+    emitted_ids: set[str] = set()
+
+    for entry in entries:
+        external_id = compute_external_id(entry)
+        entry_dt = parse_entry_timestamp(entry)
+
+        if entry_dt is not None:
+            if next_latest is None or entry_dt > next_latest:
+                next_latest = entry_dt
+                next_ids = {external_id}
+            elif entry_dt == next_latest:
+                next_ids.add(external_id)
+
+        if not should_include(entry_dt, external_id, cursor):
+            continue
+        if external_id in emitted_ids:
+            continue
+        emitted_ids.add(external_id)
+
+        link = entry.get("link")
+        title = normalize_text(entry.get("title"))
+
+        # Prefer content/summary fields in descending richness.
+        content_text: str | None = None
+        content_blocks = entry.get("content")
+        if isinstance(content_blocks, list) and content_blocks:
+            first = content_blocks[0]
+            if isinstance(first, dict):
+                content_text = normalize_text(first.get("value"))
+        if content_text is None:
+            content_text = normalize_text(entry.get("summary"))
+        if content_text is None:
+            content_text = normalize_text(entry.get("description"))
+
+        tags: list[str] = []
+        raw_tags = entry.get("tags")
+        if isinstance(raw_tags, list):
+            for tag in raw_tags:
+                term = tag.get("term") if isinstance(tag, dict) else None
+                if isinstance(term, str):
+                    cleaned = normalize_text(term)
+                    if cleaned:
+                        tags.append(cleaned)
+
+        item: dict[str, Any] = {
+            "external_id": external_id,
+            "url": link if isinstance(link, str) else None,
+            "title": title,
+            "created_at": to_rfc3339(entry_dt) if entry_dt is not None else None,
+            "content_text": content_text,
+            "tags": tags,
+        }
+        items.append(item)
+
+    return items, CursorState(latest_published_at=next_latest, seen_external_ids=next_ids)
+
+
+def serialize_cursor(cursor: CursorState) -> str | None:
+    """Serialize cursor state into compact JSON string for next_cursor."""
+    if cursor.latest_published_at is None:
+        return None
+    payload = {
+        "latest_published_at": to_rfc3339(cursor.latest_published_at),
+        "seen_external_ids": sorted(cursor.seen_external_ids),
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def reset_src_media(media_dir: Path) -> None:
+    """Reset src_media to match source contract for most-recent-run media."""
+    if media_dir.exists():
+        shutil.rmtree(media_dir)
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+
+def fetch_feed(url: str) -> bytes:
+    """Fetch feed document bytes with bounded timeout and explicit headers."""
+    with httpx.Client(
+        timeout=HTTP_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers={"User-Agent": USER_AGENT},
+    ) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        return response.content
+
+
+def write_output(items: list[dict[str, Any]], next_cursor: str | None) -> None:
+    """Write src_output.json for backend ingestion step."""
+    payload = {"items": items, "next_cursor": next_cursor}
+    Path("src_output.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def main() -> int:
+    """Execute one source run from fetch to src_output.json emission."""
+    args = parse_args()
+    cursor = parse_cursor(args.cursor)
+    reset_src_media(Path("src_media"))
+
+    try:
+        feed_bytes = fetch_feed(FEED_URL)
+    except Exception as exc:  # pragma: no cover - network exceptions vary by platform.
+        print(f"Failed to fetch RSS feed: {exc}", file=sys.stderr)
+        return 1
+
+    parsed = feedparser.parse(feed_bytes)
+    entries = parsed.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+
+    items, next_cursor_state = build_items(entries, cursor)
+    write_output(items, serialize_cursor(next_cursor_state))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

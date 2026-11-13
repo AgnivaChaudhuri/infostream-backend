@@ -1,0 +1,8 @@
+{
+  "Name": "CNN Tech RSS",
+  "Description": "RSS source for CNN Tech feed entries.",
+  "Version": "1.0.0",
+  "Interface version": "1.0.0",
+  "Developer": "Infostream",
+  "Platform": ["linux", "darwin", "windows"]
+}

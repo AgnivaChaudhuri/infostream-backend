@@ -18,3 +18,15 @@ desktop/src-tauri/target/
 
 # Runtime data
 *.log
+
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+.idea/
+.vscode/
+.DS_Store
